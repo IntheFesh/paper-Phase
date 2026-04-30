@@ -1,0 +1,34 @@
+# Ablation 6: Oracle cliff — gripper-flip indices as ground-truth cliff signal.
+#
+# This is the performance upper bound for cliff-triggered replanning.
+# The oracle cliff signal is derived from ground-truth gripper open/close
+# transitions (observable during training demos only; not available at
+# test time without privileged access to the simulator).
+#
+# pcar_input_signal="oracle_gripper" routes the env-provided gripper-flip
+# boolean directly into the PCAR trigger, bypassing all learned estimators.
+# No concordance fusion, no learned phase boundary posterior.
+#
+# Expected: SR(oracle) >= SR(concordance) — this is the upper bound.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "06_oracle_cliff"
+ablation_description: "Oracle cliff: gripper-flip ground truth (upper bound)"
+
+phaseqflow:
+  use_phase_boundary_posterior: false   # learned signal not used
+  use_pcar: true
+  pcar_input_signal: "oracle_gripper"   # privileged; env must expose gripper_flipped
+
+  use_chunk_infonce: false
+  use_pace_a: false
+  use_boundary_reweight: false
+
+  phase_mode: "flat"
+
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false

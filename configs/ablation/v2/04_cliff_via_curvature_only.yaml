@@ -1,0 +1,28 @@
+# Ablation 4: Cliff detection via I^(3) only (velocity-field curvature).
+#
+# PCAR is triggered by the velocity-curvature estimator signal
+# (i_hat_3 = -||v_theta(c_t) - v_theta(c_{t-1})||^2).
+# No concordance fusion; I^(1) and I^(2) are not used for triggering.
+# Requires ShortcutFlowActionHead (not FlowActionHeadPACE).
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "04_cliff_via_curvature_only"
+ablation_description: "Cliff via I-hat-3 only (velocity-curvature)"
+
+phaseqflow:
+  use_phase_boundary_posterior: false   # I^(1) not used
+  use_pcar: true
+  pcar_input_signal: "curvature"        # routed from VelocityCurvatureEstimator
+
+  use_chunk_infonce: false
+  use_pace_a: false
+  use_boundary_reweight: false
+
+  phase_mode: "flat"
+
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false
