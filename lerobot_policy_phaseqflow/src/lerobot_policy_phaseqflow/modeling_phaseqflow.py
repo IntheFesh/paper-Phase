@@ -1004,6 +1004,15 @@ class ShortcutFlowActionHead(nn.Module):
         return {"action_pred": x_1}
 
 
+# ============================================================
+# DEPRECATED for PACE v2 main path.
+# Kept for ablation only. PACE v2 does not rely on online residual
+# correction; boundary-step errors are addressed by the concordance
+# detector C_t (phase_centric/cliff_detection/) and boundary-aware
+# flow loss (Phase C). Closed-loop correction introduces latency
+# incompatible with real-time replanning via PCAR.
+# To re-enable: set cfg.use_correction_head = True (currently False).
+# ============================================================
 class A2C2CorrectionHead(nn.Module):
     """A2C2 online correction head (arXiv 2509.23224, "Leave No Observation Behind").
 
@@ -1140,6 +1149,15 @@ class ChunkVerifierMLP(nn.Module):
 ChunkVerifier = ChunkVerifierMLP
 
 
+# ============================================================
+# DEPRECATED for PACE v2 main path.
+# Kept for ablation only. PACE v2 does not rely on Q-V advantage
+# as the confidence signal; the main path uses the concordance
+# detector C_t (see phase_centric/cliff_detection/concordance.py)
+# which fuses three Predictability-Cliff estimators without
+# requiring offline Q-function training or expectile regression.
+# To re-enable: set cfg.use_iql_verifier = True (currently False).
+# ============================================================
 class IQLChunkVerifier(nn.Module):
     """IQL-style V_ψ / Q_θ chunk-level critic (Kostrikov et al., 2110.06169).
 

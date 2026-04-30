@@ -1,3 +1,13 @@
+# ============================================================
+# DEPRECATED for PACE v2 main path.
+# Kept for ablation only. PACE v2 does not use BID at test time;
+# replanning decisions are made by the concordance detector C_t
+# (phase_centric/cliff_detection/), which triggers PCAR at the
+# Predictability Cliff rather than scoring N backward-coherent
+# candidates. BID's N-candidate overhead is also incompatible
+# with the latency budget of real-time concordance-based replanning.
+# To re-enable: set cfg.use_bid_sampling = True (currently False).
+# ============================================================
 """Bidirectional Decoding test-time sampler (Liu et al., arXiv 2408.17355).
 
 At every rollout step the flow action head samples ``N`` candidate chunks.

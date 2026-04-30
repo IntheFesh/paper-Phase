@@ -141,13 +141,14 @@ class PhaseQFlowConfig(PreTrainedConfig):
     ensemble_buffer_size: int = 16
 
     verifier_type: str = "iql"
+    use_iql_verifier: bool = False  # PACE v2: deprecated to ablation only; existing verifier_type controls wiring
     iql_expectile_tau: float = 0.8
     iql_gamma: float = 0.99
     iql_confidence_beta: float = 3.0
     iql_target_tau: float = 0.005
     iql_reward_type: str = "imitation"
 
-    use_bid_sampling: bool = True
+    use_bid_sampling: bool = False  # PACE v2: deprecated to ablation only
     bid_num_samples: int = 5
     bid_weak_policy_ema_decay: float = 0.99
     bid_backward_weight: float = 0.5
@@ -156,7 +157,7 @@ class PhaseQFlowConfig(PreTrainedConfig):
     replan_v_drop_threshold: float = 0.3
     replan_ensemble_var_threshold: float = 0.1
 
-    use_correction_head: bool = True
+    use_correction_head: bool = False  # PACE v2: deprecated to ablation only
     correction_hidden_dim: int = 640
     correction_num_layers: int = 4
     correction_num_heads: int = 8
