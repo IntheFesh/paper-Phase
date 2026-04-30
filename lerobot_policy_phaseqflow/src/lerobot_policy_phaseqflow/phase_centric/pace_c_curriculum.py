@@ -1,3 +1,13 @@
+# ============================================================
+# DEPRECATED for PACE v2 main path.
+# Phase-density curriculum is moved to ablation only. PACE v2
+# main path does not bias sampling toward phase boundaries during
+# training — boundary signal enters via boundary-aware flow loss
+# (Phase C) and concordance replanning (Phase B), not data sampling.
+# Curriculum sampling also conflicts with the new DKW-guaranteed
+# PCAR budget quantile, which assumes an unbiased β distribution.
+# To re-enable: set cfg.use_pace_c = True (currently False).
+# ============================================================
 """PACE-C: phase-density curriculum learning.
 
 Motivation

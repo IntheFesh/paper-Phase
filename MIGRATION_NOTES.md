@@ -1,121 +1,115 @@
-# Migration Notes — PACE v2 / Predictability-Cliff Terminology
+# PACE v2 重构日志
 
-This document tracks open engineering questions that require a human author decision
-before implementation can proceed. All entries in §1 "Pending Human Decisions" are
-blocking at least one downstream component.
+## Repository Audit (filled by Claude Code)
 
----
+Confirmed against actual repo structure (last verified: 2026-04-30):
+
+- LeRobot plugin layout: confirmed at
+  `lerobot_policy_phaseqflow/src/lerobot_policy_phaseqflow/`
+  registered via `@PreTrainedConfig.register_subclass("phaseqflow")`
+- `phase_centric/` subpackage: 8 files present
+  (`__init__.py`, `identifiability.py`, `phase_posterior.py`,
+  `pace_a_loss.py`, `pace_b_moe.py`, `pace_c_curriculum.py`,
+  `pcar_trigger.py`, `theory_utils.py`, `cliff_estimators.py`)
+- pytest baseline: **94 passed** (80 original + 14 cliff-estimator tests added in Phase B)
+- smoke baseline: **7 modes pass** (`off`, `ident_only`, `pace_a`, `pace_b`, `pace_c`, `pcar`, `full`)
+- Differences from prompt assumed layout:
+  - No `scripts/verification/` directory (verification scripts referenced in
+    ARCHITECTURE.md do not exist yet; OPERATIONS_GUIDE.md §11 references them)
+  - No `configs/eval/` directory (referenced by Phase A BID check)
+  - `use_iql_verifier` field did not exist in original config; added in Phase A
+  - `cliff_estimators.py` already created in prior work; `cliff_detection/` full
+    subpackage created in Phase A
+  - Test count is 94, not 77 (14 cliff-estimator tests pre-exist this phase)
 
 ## Pending Human Decisions
 
 ### [PHD-1] I_hat_2 — Action-Variance Cliff Estimator
 
 **Formula (locked):**
-$$\hat I^{(2)}(t) \propto -\sigma_t^2 = -\frac{1}{N}\sum_{i=1}^{N}\|a_t^{(i)} - \bar a_t\|^2$$
+$\hat I^{(2)}(t) \propto -\sigma_t^2 = -\frac{1}{N}\sum_{i=1}^{N}\|a_t^{(i)} - \bar a_t\|^2$
 
-**Blocking question:** How and when should the N action samples be drawn?
+**Blocking question:** How should N action samples be drawn?
 
-**Option A — BID sampling path:**  
-When `use_bid_sampling=True`, `BIDSampler` already draws N=5 candidate chunks in
-`select_action`. The variance across the N candidates could be used as I_hat_2.
-However: `select_action` runs only at inference; `compute_loss` never calls it,
-so I_hat_2 would be unavailable during training, making PACE-A and PACE-B unable
-to use it as a weighting signal. Also, the BID candidates share the same `cond`
-vector; they differ only in noise seed, which gives aleatoric uncertainty, not
-epistemic uncertainty tied to phase boundaries.
+- **Option A** — BID path (N=5 candidates in `select_action`): available only at
+  inference, not training; candidates share one condition vector so variance is
+  aleatoric only.
+- **Option B** — Multi-noise-seed call inside `forward`: N extra flow forward
+  passes; 5× compute overhead; need to decide training vs. inference vs. both.
+- **Option C** — Temporal-ensembling buffer variance across time steps.
 
-**Option B — Fixed multi-noise-seed call inside `forward`:**  
-Call `flow_action_head` (or `pace_b_flow_head`) with `training=False` and N
-different noise seeds at each forward pass. Store all N predictions, compute the
-mean and variance. Cost: N extra forward passes per step (N=5 → 5× slowdown).
-Alternatively, a single forward in `training=True` mode already samples one noise
-vector; repeating it N times with `torch.no_grad()` would work but needs
-deciding whether I_hat_2 is computed in training mode, inference mode, or both.
+**Decision needed:** Which option is the intended semantic?
 
-**Option C — Ensemble-buffer variance:**  
-If temporal ensembling is on (`use_temporal_ensembling=True`), the
-`ACTTemporalEnsembler` holds a rolling buffer of past predictions. The variance
-over this buffer is a proxy for action consistency, but it blends across time
-steps rather than sampling variance at a single step.
-
-**Decision needed:** Which of A / B / C is the intended semantic? Or a new option?
-
-**Blocked component:** `cliff_estimators.compute_I_hat_2`, and transitively
-`cliff_estimators.compute_concordance_C`.
+**Blocked:** `cliff_detection/policy_variance.py`, `concordance.py`.
 
 ---
 
 ### [PHD-2] I_hat_3 — Velocity-Difference Cliff Estimator
 
 **Formula (locked):**
-$$\hat I^{(3)}(t) \propto -\|v_\theta(x_\tau, \tau, c_t) - v_\theta(x_\tau, \tau, c_{t-1})\|_2^2$$
+$\hat I^{(3)}(t) \propto -\|v_\theta(x_\tau, \tau, c_t) - v_\theta(x_\tau, \tau, c_{t-1})\|_2^2$
 
-This requires three inputs that are not currently available together:
+Three sub-decisions:
 
-**Sub-question 2a — Anchor point `(x_τ, τ)`:**  
-The velocity field `v_θ` must be evaluated at a *fixed* anchor point so that
-the difference isolates the conditioning change rather than a trajectory position
-change. Options:
-- `x_τ = 0` (zero vector, fully noised), `τ = 0` — cheapest; no semantic meaning.
-- `x_τ = randn(...)` sampled once per episode and fixed — reproducible but
-  depends on the seed.
-- `x_τ` = the previous predicted action chunk (i.e. `action_pred` from the prior
-  step) — semantically meaningful but means the anchor drifts with the policy.
-- `τ = 0.5` (midpoint of the flow trajectory) — a common choice in flow-matching
-  papers for sensitivity analysis.
+- **PHD-2a** — Anchor point `(x_τ, τ, d)`: zero vector / episode-fixed noise /
+  previous action chunk? τ=0, 0.5, or 1?
+- **PHD-2b** — Storage of `c_{t-1}`: buffer inside `ShortcutFlowActionHead` or
+  passed in from `select_action` loop?
+- **PHD-2c** — Velocity exposure: rename `_velocity` → `velocity` or add public
+  `eval_velocity(x, t, d, cond)` wrapper?
 
-Decision: which `(x_τ, τ, d)` triplet to fix?
-
-**Sub-question 2b — Storage of `c_{t-1}`:**  
-`c_t` is the condition vector `cond = conditioner([fused_obs, phase_embed,
-skill_latent])` computed inside `ShortcutFlowActionHead.forward`. At inference,
-the previous step's condition vector `c_{t-1}` is not stored. Storing it requires
-either:
-- A `_prev_cond` buffer inside `ShortcutFlowActionHead` (parallel to
-  `PhasePosteriorEstimator._running_p`), OR
-- Passing `c_{t-1}` in from the policy's `select_action` loop.
-
-Decision: where should `c_{t-1}` be buffered?
-
-**Sub-question 2c — Expose `_velocity` as a public method:**  
-`ShortcutFlowActionHead._velocity` is a private method. Computing I_hat_3 from
-outside the head (e.g., from `PhaseQFlowPolicy.forward`) would require either:
-- Renaming `_velocity` → `velocity` (a one-line change, backward-compatible if
-  no external code calls the private name), OR
-- Adding a new public `eval_velocity(x, t, d, cond)` that delegates to the
-  private method.
-
-Decision: rename or wrap?
-
-**Blocked component:** `cliff_estimators.compute_I_hat_3`, and transitively
-`cliff_estimators.compute_concordance_C`.
+**Blocked:** `cliff_detection/velocity_curvature.py`, `concordance.py`.
 
 ---
 
 ### [PHD-3] Concordance C_t — Rank-Based Fusion
 
 **Formula (locked):**
-$$C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}(t)) + \mathrm{rank}_W(\hat I^{(2)}(t)) + \mathrm{rank}_W(\hat I^{(3)}(t))]$$
+$C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}) + \mathrm{rank}_W(\hat I^{(2)}) + \mathrm{rank}_W(\hat I^{(3)})]$
 
-**Blocking dependency:** Requires PHD-1 and PHD-2 to be resolved first.
+**Blocked on:** PHD-1 and PHD-2.
+**Sub-question:** Window size W? (PCAR uses 1000; suggest W=50 matching warmup_min.)
 
-**Additional sub-question:** What is the rolling window size W?
-
-The PCAR trigger uses `history_size=1000` for the β distribution. A reasonable
-default for `rank_W` would be W=50 (matching PCAR's `warmup_min`) so the
-concordance is meaningful as soon as PCAR exits its warmup phase. But this is a
-hyperparameter that needs explicit confirmation.
-
-**Blocked component:** `cliff_estimators.compute_concordance_C`.
+**Blocked:** `cliff_detection/concordance.py`.
 
 ---
 
-## Completed Migrations
+## Phase Completion Log
 
-| Item | Status | PR / commit |
-|------|--------|-------------|
-| Add `I_hat_1 = -phase_beta` to predict_action output | ✅ Done | branch `claude/standardize-cliff-terminology-3Uuqa` |
-| Create `phase_centric/cliff_estimators.py` cliff namespace module | ✅ Done | branch `claude/standardize-cliff-terminology-3Uuqa` |
+### Phase B Completed 2026-04-30
+
+- Added cliff-namespace public-facing interfaces:
+  - Created `phase_centric/cliff_estimators.py`:
+    `compute_I_hat_1` (implemented), `I_hat_2/3/concordance_C` (stubs)
+  - `modeling_phaseqflow.py`: exposes `I_hat_1 = -phase_beta` in
+    `predict_action` output when `use_phase_boundary_posterior=True`
+  - `phase_centric/__init__.py`: registered `cliff_estimators` in `__all__`
+  - Added `.gitignore`
+- Tests: 80 → 94 passed (14 new cliff-estimator tests)
+- Smoke: 7-mode all pass
+- New dependencies introduced: none
+- 94 pytest passed, 7-mode smoke passed
+
+---
+
+### Phase A Completed 2026-04-30
+
+- Deprecated 4 modules via cfg.use_* switches (no code-path branches added):
+  - `IQLChunkVerifier` — deprecation header added; `use_iql_verifier: bool = False`
+    added to config (existing wiring via `verifier_type: str = "iql"` unchanged)
+  - `A2C2CorrectionHead` — deprecation header added; `use_correction_head`
+    default changed `True → False` (**breaking-default change noted**)
+  - `BIDSampler` — deprecation header added; `use_bid_sampling`
+    default changed `True → False` (**breaking-default change noted**)
+  - `pace_c_curriculum` — deprecation header added; `use_pace_c` already `False`
+- Created skeleton: `phase_centric/cliff_detection/` subpackage +
+  `scripts/{phenomenon,calibration,figures}/`
+- Config default changes:
+  - `use_correction_head: True → False`
+  - `use_bid_sampling: True → False`
+  - `use_iql_verifier: bool = False` (new field)
+- Baselines unchanged: 94 pytest passed, 7-mode smoke passed
+- New dependencies introduced: none
 
 ---
 
@@ -126,8 +120,8 @@ hyperparameter that needs explicit confirmation.
 | Predictability Cliff | (concept) | cliff |
 | Boundary probability β_t | `phase_beta`, `beta_t` | — (internal only) |
 | Cliff estimator I^(1) | `-phase_beta` | `I_hat_1` |
-| Cliff estimator I^(2) | (pending) | `I_hat_2` |
-| Cliff estimator I^(3) | (pending) | `I_hat_3` |
-| Concordance C_t | (pending) | `concordance_C` |
+| Cliff estimator I^(2) | (pending PHD-1) | `I_hat_2` |
+| Cliff estimator I^(3) | (pending PHD-2) | `I_hat_3` |
+| Concordance C_t | (pending PHD-3) | `concordance_C` |
 | Phase posterior p̂_t | `phase_p_hat`, `p_hat` | — (internal only) |
 | Bhattacharyya distance β_t | `_bhattacharyya_beta` | — (internal only) |
