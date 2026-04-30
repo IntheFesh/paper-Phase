@@ -20,6 +20,7 @@ import-time smoke tests stay green.
 from __future__ import annotations
 
 __all__ = [
+    "cliff_estimators",
     "identifiability",
     "phase_posterior",
     "pace_a_loss",
