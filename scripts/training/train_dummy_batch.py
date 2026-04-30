@@ -13,9 +13,8 @@ configs (``baseline`` / ``ident`` / ``a`` / ``b`` / ``c`` / ``ab`` / ``ac`` /
 ``--output_dir`` and ``--total_steps``. Each run writes an
 ``eval_results.json`` (carrying ``placeholder: true`` in CPU dry-runs; a real
 GPU training + lerobot-eval pass will overwrite it with ``placeholder: false``
-and fill the success rate). The real Round 8 runs are orchestrated by
-``scripts/training/run_ablation.sh``; this script only executes a single
-``(config, seed)`` cell.
+and fill the success rate). This script executes a single ``(config, seed)``
+cell; to run the full seven-config ablation matrix call it once per config.
 
 Design choices (confirmed in Round 2; carried over to Round 8)
 --------------------------------------------------------------
@@ -25,12 +24,11 @@ Design choices (confirmed in Round 2; carried over to Round 8)
 - **2C keep bitsandbytes as a legacy optional**: see ``requirements.txt``. The
   ``use_paged_adamw_8bit=False`` override lets this script run on CPU-only
   machines without bnb installed.
-- **Round 8 occupation markers**: ``eval_done.marker`` is created by
-  ``run_ablation.sh``; ``eval_results.json`` is maintained jointly by this
-  script and ``run_eval_libero.sh``. In CPU dry-runs, the SR fields carry a
-  placeholder value in ``[0, 1]`` and are clearly marked with
-  ``placeholder: true`` so the aggregate script knows it is plumbing, not
-  measurement.
+- **Occupation markers**: ``eval_done.marker`` signals completion;
+  ``eval_results.json`` is maintained by this script and by the LIBERO
+  eval harness. In CPU dry-runs the SR fields carry a placeholder value
+  and are marked ``placeholder: true`` so the aggregate script knows it
+  is plumbing, not measurement.
 
 Examples
 --------
