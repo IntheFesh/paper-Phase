@@ -1634,6 +1634,9 @@ class PhaseQFlowPolicy(nn.Module):
             preds["phase_p_hat"] = phase_p_hat
         if phase_beta is not None:
             preds["phase_beta"] = phase_beta
+            # Cliff-namespace public-facing interface: I_hat_1 = -beta_t
+            from .phase_centric.cliff_estimators import compute_I_hat_1
+            preds["I_hat_1"] = compute_I_hat_1(phase_beta)
         return preds
 
     def predict_action(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
