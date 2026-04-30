@@ -13,10 +13,41 @@
 ## Contents
 
 - [§1 System Architecture](#1-system-architecture)
+  - [1.1 Data flow](#11-data-flow-overview)
+  - [1.2 Tensor shapes](#12-tensor-shape-table)
+  - [1.3 Module signatures](#13-core-module-signatures)
+  - [1.4 Training stack](#14-training-stack)
+  - [1.5 Three-stage curriculum](#15-three-stage-curriculum)
 - [§2 Phase-Centric Theory Framework](#2-phase-centric-theory-framework)
+  - [2.1 Phase identifiability / InfoNCE](#21-phase-identifiability-chunk-level-infonce)
+  - [2.2 Bhattacharyya β_t = I^(1)](#22-phase-posterior-and-bhattacharyya-boundary-signal-hati1)
+  - [2.3 Boundary-aware FM loss](#23-variational-lower-bound-for-pace-a-weighted-flow-matching)
+  - [2.4 DKW convergence for PCAR](#24-dkw-convergence-for-pcar-budget-quantile)
+  - [2.5 Theory synthesis](#25-theory-synthesis-how-the-four-pillars-connect)
 - [§3 Cliff Estimators, Concordance, and PCAR](#3-cliff-estimators-concordance-and-pcar)
+  - [3.1 Phase InfoNCE (implemented)](#31-phase-identifiability--chunk-level-infonce)
+  - [3.2 I^(1) Bhattacharyya β_t (implemented)](#32-hati1--bhattacharyya-boundary-signal-betat-implemented)
+  - [3.3 I^(2) Action variance (pending)](#33-hati2--action-ensemble-variance-sigma_t2-pending)
+  - [3.4 I^(3) Velocity curvature (pending)](#34-hati3--velocity-field-curvature-kappa_t-pending)
+  - [3.5 Concordance C_t (pending)](#35-concordance-c_t-pending)
+  - [3.6 PCAR](#36-pcar--predictability-cliff-adaptive-replanning)
+  - [3.7 Boundary-aware flow loss](#37-boundary-aware-flow-loss-pace-a)
+  - [3.8 Summary table](#38-summary)
 - [§4 Ablation Matrix (v2, seven configs)](#4-ablation-matrix-v2-seven-configs)
+  - [4.1 Matrix structure](#41-matrix-structure)
+  - [4.2 Design principles](#42-design-principles)
+  - [4.3 Statistical aggregation](#43-statistical-aggregation)
+  - [4.4 Specificity test](#44-falsification-design-specificity-test)
+  - [4.5 SOTA reference points](#45-sota-reference-points)
+  - [4.6 Reproduction commands](#46-reproduction-commands)
 - [§5 Verification System](#5-verification-system)
+  - [5.1 Acceptance table](#51-scriptassertionacceptance-table)
+  - [5.2 Hungarian alignment](#52-identifiability-verification-hungarian-alignment)
+  - [5.3 Posterior peak alignment](#53-posterior-verification-peak-alignment)
+  - [5.4 Boundary-aware FM loss sanity](#54-boundary-aware-flow-loss-sanity)
+  - [5.5 PCAR budget verification](#55-pcar-budget-quantile-verification)
+  - [5.6 Coverage table](#56-coverage)
+  - [5.7 Self-check commands](#57-one-liner-self-check)
 
 ---
 
@@ -820,314 +851,263 @@ $\mathbb{E}[\beta] > 0.1$ (entropy regulariser is effective).
 
 ---
 
-## 4 Ablation Matrix Design
+## 4 Ablation Matrix (v2, seven configs)
 
 ### 4.1 Matrix structure
 
-Twelve configs × 3 seeds = 36 runs, covering the six-dimensional
-feature space from plain baseline to fully-on. Each config is
-uniquely determined by a combination of feature-gate switches:
+Seven configs × 3 seeds = 21 runs, each with a unique combination
+of cliff-detection signals and boundary reweighting. All configs
+live under `configs/ablation/v2/` and inherit the full base
+architecture from `configs/train/02_train_phase_and_flow.yaml`
+(only the `use_*` flags differ).
 
-| Config | InfoNCE (I1) | $\beta_t$ (I2) | PACE-A (I3) | PACE-B (I4) | PACE-C (I5) | PCAR (I6) | Scientific purpose |
-| :-- | :--: | :--: | :--: | :--: | :--: | :--: | :-- |
-| `baseline` | | | | | | | Control: plain BC-Chunked pipeline |
-| `ident` | ✓ | | | | | | Measures the standalone contribution of InfoNCE identifiability |
-| `a` | | ✓ | ✓ | | | | PACE-A alone (needs $\beta_t$ to back it) |
-| `b` | | ✓ | | ✓ | | | PACE-B alone |
-| `c` | | ✓ | | | ✓ | | PACE-C alone (curriculum doesn't depend on $\beta$, but I2 stays on for a consistent comparison) |
-| `ab` | | ✓ | ✓ | ✓ | | | A×B interaction (does weighting + MoE resonate?) |
-| `ac` | | ✓ | ✓ | | ✓ | | A×C interaction (weighting + curriculum) |
-| `bc` | | ✓ | | ✓ | ✓ | | B×C interaction (MoE + curriculum) |
-| `pace` | | ✓ | ✓ | ✓ | ✓ | | All training-time PACE, PCAR off |
-| `pcar_only` | | ✓ | | | | ✓ | Standalone contribution of inference-time PCAR |
-| `full` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Everything on (headline number in the paper) |
-| `pcar_noident` | | ✓ | ✓ | ✓ | ✓ | ✓ | Full minus I1, checks whether identifiability is necessary |
+| Config file | $\hat I^{(1)}$ | $\hat I^{(2)}$ | $\hat I^{(3)}$ | Concordance | Boundary reweight | Scientific purpose |
+| :-- | :--: | :--: | :--: | :--: | :--: | :-- |
+| `01_bc_chunked.yaml` | | | | | | Control: plain BC-Chunked, fixed-H replanning, no cliff detection |
+| `02_cliff_via_beta_only.yaml` | ✓ | | | | | Marginal gain of $\hat I^{(1)}$ alone (PCAR via $\beta_t$) |
+| `03_cliff_via_var_only.yaml` | | ✓ | | | | Marginal gain of $\hat I^{(2)}$ alone (PCAR via variance) |
+| `04_cliff_via_curvature_only.yaml` | | | ✓ | | | Marginal gain of $\hat I^{(3)}$ alone (PCAR via curvature) |
+| `05_cliff_concordance.yaml` | ✓ | ✓ | ✓ | ✓ | | Full concordance, no boundary reweight |
+| `06_oracle_cliff.yaml` | — | — | — | — | — | Oracle gripper-flip signal: upper bound |
+| `07_cliff_concordance_with_boundary_reweight.yaml` | ✓ | ✓ | ✓ | ✓ | ✓ | **Full PACE v2** (paper headline) |
 
-**Seed choice**: $\{42,\ 123,\ 2024\}$ — three widely spaced seeds
-without special meaning, to rule out seed cherry-picking.
+Configs 03, 04, 05, 07 are pending until `compute_I_hat_2` /
+`compute_I_hat_3` / `compute_concordance_C` are implemented (§3.3–3.5).
+In the meantime the ablation dry-run pipeline (`--dry_run`) uses
+synthetic data to verify that the configuration wiring and
+statistical aggregation are correct end-to-end.
 
-**Total budget**: GPU (RTX 5070) $\approx 20{,}000$ steps × 36
-runs $\approx 12$ days; CPU-sandbox placeholder proxy $3$ steps ×
-36 runs $\approx 1\text{–}2$ min (for pipeline integrity and
-artifact completeness checks).
+**Seed choice**: $\{42,\ 123,\ 2024\}$.
+
+**Total compute**: GPU (RTX 5070) $\approx 20{,}000$ steps × 21
+runs $\approx 7$ days. CPU dry-run: $\approx 1{-}2$ min.
 
 ### 4.2 Design principles
 
 #### (a) Ceteris paribus
 
-- Apart from the feature gates, every hyperparameter (lr, batch,
-  optimizer, EMA, data augmentation, four-stage curriculum) is
-  **identical** across the 12 configs.
-- This is enforced by the `MODE_PRESETS` dict in
-  `scripts/training/train_dummy_batch.py` — each config overrides
-  only the `use_*` flags and never touches numerical hyperparams.
+Apart from the feature gates, every hyperparameter (lr, batch,
+optimizer, EMA, data augmentation, three-stage curriculum) is
+identical across the seven configs. Each YAML overrides only the
+`use_*` and `pcar_input_signal` fields; numerical hyper-parameters
+are inherited from the base train config.
 
-#### (b) Factorised rather than fully random
+#### (b) Additive ablation ladder
 
-- Singles (`ident` / `a` / `b` / `c` / `pcar_only`): measure the
-  **marginal contribution**
-  $\Delta_i = \text{SR}(I_i) - \text{SR}(\text{baseline})$.
-- Pairwise interactions (`ab` / `ac` / `bc`): measure the
-  **interaction term**
-  $\Delta_{ij} = \text{SR}(I_i I_j) - \Delta_i - \Delta_j - \text{SR}(\text{baseline})$;
-  $>0$ is synergy, $<0$ is conflict.
-- Pairing `full` with "remove one" (`pcar_noident`) directly
-  measures $\Delta_{\text{InfoNCE}}$ in the presence of the other
-  five — a check for whether identifiability is "only useful in
-  simple configurations."
+The seven configs form an additive ladder:
 
-#### (c) Train/inference stratification
+```
+01 (no cliff)
+  → 02 (I^(1) only)
+  → 03 (I^(2) only)          each single-estimator row measures
+  → 04 (I^(3) only)          the marginal gain of that estimator alone
+  → 05 (concordance, no reweight)
+  → 07 (concordance + reweight)  = full PACE v2 headline
+  → 06 (oracle)              upper bound; not a valid deployment config
+```
 
-- I1–I5 fire at **training** time → configs `ident`, `a`, `b`,
-  `c`, `ab`, `ac`, `bc`, `pace`.
-- I6 (PCAR) fires at **inference** time → `pcar_only` takes its
-  own slot, and `full` / `pcar_noident` measure combined effects.
+Comparing 05 → 07 isolates the contribution of boundary-aware
+flow loss. Comparing 02/03/04 → 05 measures the gain from
+multi-estimator fusion vs. any single estimator.
+
+#### (c) Train / inference separation
+
+All cliff estimators and concordance fire at **inference** time
+(they observe the current state without gradient). The boundary
+reweight fires at **training** time only. PCAR fires at both
+(training: budget calibration in stage 3; inference: actual
+replanning). This separation means inference configs can be
+swapped without retraining.
 
 ### 4.3 Statistical aggregation
 
-`scripts/paper/aggregate_ablation.py` aggregates per config ×
-benchmark (LIBERO-10 Long-Horizon / LIBERO-Spatial):
+`scripts/aggregate_ablation.py` aggregates per config × benchmark
+(LIBERO-Long / LIBERO-Spatial) using rliable-style statistics:
 
 | Field | Definition |
 | :-- | :-- |
-| $\bar{\text{SR}}$ | Mean success rate across 3 seeds |
-| $\pm \text{CI}_{95}$ | Student-$t$ 95% confidence interval (dof $n-1=2$) |
-| $p$-value | Two-tailed paired $t$-test vs baseline |
-| $\Delta$ | $\bar{\text{SR}}_{\text{cfg}} - \bar{\text{SR}}_{\text{baseline}}$ |
-| `placeholder_stats` | `true` for the CPU-sandbox dummy-batch; overwritten to `false` by a real GPU run |
+| IQM | Interquartile mean across seeds (rliable's recommended point estimate) |
+| $\text{CI}_{95}$ | Stratified bootstrap 95% CI (2000 resamples) |
+| Wilcoxon $p$ | Paired signed-rank test vs config 01 baseline |
+| Cohen's $d$ | Effect size vs baseline |
+| `placeholder` | `true` for synthetic dry-run data; `false` after GPU eval |
 
-Artifacts: `artifacts/ablation/stats.json` and
-`artifacts/paper_stats.md` (a Markdown table, paper-ready).
+```bash
+# Dry run (verifies pipeline; numbers are synthetic):
+python scripts/aggregate_ablation.py --dry_run
 
-### 4.4 Falsification design: the LIBERO-Spatial specificity test
+# Real run (after GPU training, outputs in outputs/ablation_v2/):
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
+```
 
-**Logic**: if the Phase-Centric innovations were a generic
-regulariser, they would also improve tasks that have **no obvious
-phase structure**; if the gains really are "phase-driven," then
-spatial generalisation (LIBERO-Spatial) should benefit
-significantly less than long-horizon (LIBERO-10).
+Artifacts: `paper_figures/ablation_v2/ablation_table_v2.tex` and
+`ablation_stats.csv`.
 
-**Operationalisation**: roll out the same checkpoint on both
-benchmarks:
+### 4.4 Falsification design: specificity test
+
+If the cliff-detection gains were a generic regulariser, LIBERO-Spatial
+(no consistent phase structure) should benefit as much as
+LIBERO-Long. The specificity metric is:
 
 $$
 \Delta_{\text{specificity}}
-  = \big[\text{SR}_{\text{long}}(\text{full}) - \text{SR}_{\text{long}}(\text{baseline})\big]
-    - \big[\text{SR}_{\text{spatial}}(\text{full}) - \text{SR}_{\text{spatial}}(\text{baseline})\big]
+  = \big[\text{SR}_{\text{long}}(07) - \text{SR}_{\text{long}}(01)\big]
+    - \big[\text{SR}_{\text{spatial}}(07) - \text{SR}_{\text{spatial}}(01)\big]
 $$
 
-- $\Delta_{\text{specificity}} > 0$ with $p < 0.05$: supports the
-  "phase-driven" hypothesis.
-- $\Delta_{\text{specificity}} \approx 0$: the gain is a generic
-  regulariser and the hypothesis is falsified.
+$\Delta_{\text{specificity}} > 0$ with $p < 0.05$ supports
+the cliff-driven hypothesis; $\approx 0$ falsifies it.
 
-**Expected value** (real GPU run): $\Delta_{\text{specificity}}$
-around $+8$ to $+10$ pp (PACE-C on Spatial is projected to give
-$\Delta_c \approx -1.8$ pp, i.e. a negative contribution, which is
-exactly the counter-check that I5 relies on phase structure).
+### 4.5 SOTA reference points
 
-### 4.5 Comparison with SOTA (reference points, not a contribution of this repo)
+Numbers reported in published papers on LIBERO-Long; included for
+Related Work context only. These are **not reproduced by this
+repo** — the checkpoint and evaluation protocol differences
+between papers make direct comparison unreliable without a shared
+evaluation harness.
 
-Publicly reported LIBERO-10 numbers:
-
-| Method | Reported SR | Source |
+| Method | Reported LIBERO-Long SR | Source |
 | :-- | :--: | :-- |
 | OpenVLA-OFT | 54.5% | arXiv 2502.19645 |
 | $\pi_0$ | 60.0% | arXiv 2410.24164 |
 | MoH | 57.8% | arXiv 2410.11842 |
 
-The three rows above are **reference points** for the paper's
-Related Work only. The true LIBERO-10 SR of the repo's `full`
-config has to be read from `artifacts/ablation/stats.json` after a
-completed RTX 5070 run of `run_ablation.sh` +
-`run_eval_libero.sh`; **CPU placeholder numbers must not stand in
-for it** (that field carries `placeholder_stats=true`).
+The PACE v2 `full` config SR must come from
+`paper_figures/ablation_v2/ablation_stats.csv` produced by a
+completed GPU run; synthetic dry-run numbers (`placeholder=true`)
+must not be cited as results.
 
 ### 4.6 Reproduction commands
 
 ```bash
-# Full matrix (real GPU run)
-TOTAL_STEPS=20000 SEEDS="42 123 2024" DEVICE=cuda \
-    bash scripts/training/run_ablation.sh
+# Pipeline integrity check (CPU, ~2 min, no checkpoint needed):
+python scripts/aggregate_ablation.py --dry_run
+bash scripts/smoke/smoke_phase_centric.sh
 
-# Pipeline sanity (CPU, 1–2 min)
-TOTAL_STEPS=3 SEEDS="42 123" DEVICE=cpu SKIP_EVAL=1 \
-    bash scripts/training/run_ablation.sh
+# Stage 2 training for one config (GPU required):
+python scripts/training/train_dummy_batch.py \
+    --config configs/ablation/v2/07_cliff_concordance_with_boundary_reweight.yaml \
+    --total_steps 20000 --seed 42
+
+# Aggregate results after all 21 runs:
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
 ```
-
-Matrix runs use `eval_done.marker` files for resumable
-checkpointing; aggregation, figures, and the LaTeX table are
-regenerated automatically at the tail of the script.
 
 ---
 
 ## 5 Verification System
 
-The verification system sidesteps large-scale SR evaluation: the
-core mathematical assertions of every Phase-Centric innovation can
-be falsified inside a **CPU sandbox**. All scripts live under
-`scripts/verification/`, and each one targets three properties:
-fast ($\le 2$ min), falsifiable (PASS / FAIL verdict), and
-statistically interpretable (carrying a $p$-value or confidence
-interval).
+Every mathematical claim in §2–3 can be falsified in a CPU
+sandbox without a dataset or GPU. All scripts live under
+`scripts/verification/` and `scripts/smoke/`. Each returns a
+clear PASS / FAIL verdict and takes under 2 minutes.
 
 ### 5.1 Script–assertion–acceptance table
 
-| Script | Target innovation | Statistical assertion | Expected output |
-| :-- | :-- | :-- | :-- |
-| `verify_identifiability.py` | I1 Chunk-NCE | Hungarian-aligned permuted-agreement across 3 seeds $\ge 0.7$ | verdict: PASS / WARN_DEGENERATE |
-| `verify_phase_posterior.py` | I2 $\beta_t$ | $\beta_t$ peaks align with ground-truth boundaries on 50 demos (peak-F1 $\ge 0.5$) | verdict: PASS |
-| `sanity_pace_a.py` | I3 PACE-A | Boundary-step FM loss reduced by $\ge 20\%$ vs `no_weight`, with $\mathbb{E}[\beta]>0.1$ | `passes_20pct_boundary_reduction` |
-| `sanity_pace_b.py` | I4 PACE-B | Gate L2 $>0.3$ at boundary, $<0.05$ inside a phase | `passes_gate_magnitude_contrast` |
-| `verify_pcar_budget.py` | I6 PCAR | $\forall \epsilon \in \{0.05, 0.1, 0.2, 0.3\}$: $\|\text{actual\_rate}-\epsilon\|<0.005$ | verdict: PASS |
+| Script | What it checks | Acceptance criterion |
+| :-- | :-- | :-- |
+| `verify_identifiability.py` | Phase InfoNCE codebook alignment across 3 seeds | Hungarian permuted-agreement $\ge 0.7$ |
+| `verify_phase_posterior.py` | $\hat I^{(1)}$ peaks align with ground-truth boundaries (50 demos) | peak-F1 $\ge 0.5$ at $\pm 3$-frame tolerance |
+| `sanity_pace_a.py` | Boundary-aware flow loss reduces boundary-step FM loss | reduction $\ge 20\%$ vs `no_weight`; $\mathbb{E}[\beta] > 0.1$ |
+| `verify_pcar_budget.py` | PCAR actual replan rate tracks budget $\epsilon$ (DKW bound) | $\|\text{rate} - \epsilon\| < 0.005$ for all $\epsilon \in \{0.05, 0.1, 0.2, 0.3\}$ |
+| `sanity_pace_b.py` | *(optional)* PACE-B MoE gate switches meaningfully at boundaries | gate L2 $> 0.3$ boundary, $< 0.05$ interior |
 
-(I5 PACE-C verification is folded into the curriculum-mask
-assertion inside `train_dummy_batch.py`; its "boundary-count
-filter" is deterministic logic and doesn't need a statistical
-check.)
+`sanity_pace_b.py` tests the optional PACE-B MoE gate
+(`use_pace_b=True`), which is disabled in all shipped configs.
+It is included to verify the gating mechanism remains correct
+even when not in the main ablation path.
 
 ### 5.2 Identifiability verification: Hungarian alignment
 
-**Problem**: phase codebooks trained on the same data across three
-seeds are unordered — seed 42's "code 7" might correspond to seed
-123's "code 12." Comparing argmax directly is unfair.
-
-**Solution**: for each pair (seed $i$, seed $j$), build a
-$K \times K$ confusion matrix $C_{ij}$ ($C_{ij}[a,b]$ = number of
-samples that seed $i$ assigned to $a$ and seed $j$ assigned to
-$b$), run the **Kuhn–Munkres (Hungarian) algorithm**
-(`scipy.optimize.linear_sum_assignment` on $-C$ gives the maximum
-matching) to find the best permutation $\pi_{ij}$, then compute
-the aligned agreement rate:
+Phase codebooks trained across three seeds are unordered — seed
+42's "code 3" may correspond to seed 123's "code 11." For each
+pair $(i, j)$, build a $K \times K$ confusion matrix $C_{ij}$
+and run the Kuhn–Munkres algorithm
+(`scipy.optimize.linear_sum_assignment` on $-C$) to find the
+best permutation $\pi_{ij}$:
 
 $$
 \text{PA}(i, j)
   = \frac{1}{N}\sum_{n=1}^{N}
-    \mathbb{1}\!\left[\hat z^{(i)}_n = \pi_{ij}\big(\hat z^{(j)}_n\big)\right]
+    \mathbb{1}\!\left[\hat z^{(i)}_n = \pi_{ij}\!\left(\hat z^{(j)}_n\right)\right]
 $$
 
-The final permuted-agreement is
-$\text{mean}_{i<j}\text{PA}(i,j)$.
+Final score: $\text{mean}_{i<j}\,\text{PA}(i,j)$. Threshold $0.7$
+is $175\times$ the random-assignment baseline ($1/K \approx 0.004$
+for $K=240$); a trivially collapsed codebook also fails because
+the InfoNCE loss is simultaneously very high.
 
-**Why $0.7$**: under random assignment
-$\mathbb{E}[\text{PA}] = 1/K$ ($\approx 0.004$ for $K=240$); a
-collapse to a single code gives PA $=1$, but the InfoNCE loss
-explodes at the same time (the "loss $<$ bound" side-check
-prevents that trivial single-code pass). $0.7$ is a robust lower
-bound for "three independent random processes reaching agreement";
-typical values after 10k–20k GPU steps are $>0.8$.
+### 5.3 Posterior verification: peak alignment
 
-### 5.3 Posterior verification: peak alignment and $\beta$-density threshold
+`verify_phase_posterior.py` generates ground-truth boundary
+timestamps over 50 synthetic demos, finds local peaks of $\beta_t$
+(strictly greater than both neighbours and $> \theta_{\text{peak}}$),
+and matches against ground truth within $\pm 3$ frames.
 
-**Operating logic**: `verify_phase_posterior.py` generates
-ground-truth phase-boundary timestamps $t^{\text{gt}}_k$ over 50
-synthetic demos, then finds local peaks of $\beta_t$
-($\beta_t > \max(\beta_{t-1}, \beta_{t+1})$ and
-$\beta_t > \theta_{\text{peak}}$) and matches them against the
-ground truth with a $\pm 3$-frame tolerance window to compute
-peak-F1.
+Default $\theta_{\text{peak}} = 0.15$ (conservative — more false
+positives, harder to achieve F1). After a GPU training run, pass
+`--peak-threshold 0.5` for the production-ready threshold.
 
-**Threshold choice**: $\theta_{\text{peak}}$ has two settings:
+### 5.4 Boundary-aware flow loss sanity
 
-| Threshold | Meaning | Applicable when |
-| :-- | :-- | :-- |
-| $0.15$ | "any visible distribution drift" | early training, when $\hat p_t$ is still not sharp |
-| $0.50$ | "significant distribution change (below half BC)" | late training, around the downstream default $\tau^{\text{cp}}$ used by PCAR |
-
-The repo's verification uses $0.15$ (the lower threshold is
-stricter — more false positives, harder to pass F1); after a long
-GPU run, switch to $0.50$ by passing `--peak-threshold 0.5` to
-`verify_phase_posterior.py`.
-
-**Why not BCE/CE**: the ground-truth boundaries are sparse
-discrete events, and BCE has near-zero gradient at
-$t \neq t^{\text{gt}}$, so it can't measure alignment quality.
-
-### 5.4 PACE-A counter-example design
-
-**Core design**: `sanity_pace_a.py` synthesises three groups:
-
-1. **boundary-heavy**: $\beta_t$ constantly $1$ (pure
-   transitions).
-2. **interior-flat**: $\beta_t$ constantly $0$ (no transitions).
-3. **mixed**: $20\%$ of steps at $1$, the rest at $0$ (close to a
-   real scene).
-
-Train $v_\theta$ to convergence on each group (100 steps is enough
-for a small synthetic model) and compare the **boundary-step** FM
-loss for `full` vs `no_weight`:
+`sanity_pace_a.py` synthesises three groups (boundary-heavy,
+interior-flat, mixed) and trains a small velocity network for
+100 steps with `full` vs `no_weight` modes. The acceptance check
+measures:
 
 $$
 \text{reduction}
-  = \frac{\text{FM}_{\text{no\_weight}}(\text{boundary}) - \text{FM}_{\text{full}}(\text{boundary})}
-         {\text{FM}_{\text{no\_weight}}(\text{boundary})}
+  = \frac{\text{FM}_{\text{no\_weight}} - \text{FM}_{\text{full}}}
+         {\text{FM}_{\text{no\_weight}}}
+  \ge 20\%
 $$
 
-Require reduction $\ge 20\%$. That number matches the theoretical
-ceiling for $\lambda=2.0$: the weight amplifies boundary-step loss
-by up to $3\times$, which raises the equivalent step count from
-$1$ to $3$ and speeds up boundary fitting by $\approx 3\times$,
-translating into a roughly $25\%$ drop in final FM over 100
-training steps. $20\%$ is the conservative threshold.
+The $20\%$ threshold is conservative for $\lambda = 0.5$
+(`boundary_reweight_lambda` in v2 configs): $w_{\text{max}} =
+1 + 0.5 = 1.5$, which accelerates boundary-step fitting by
+$50\%$ in the best case; a $20\%$ net reduction over 100 steps
+is comfortably reachable.
 
-**`no_entropy` mode**: verifies the entropy regulariser is
-necessary — without it, $\beta$ can drift toward $0.5$ (maximally
-uncertain), weakening the weighting signal. The script records
-`mean_beta` and requires $>0.1$ to rule out $\beta$ collapsing.
+### 5.5 PCAR budget-quantile verification
 
-### 5.5 PACE-B gate-magnitude contrast
-
-`sanity_pace_b.py` computes the gate update
-$\|g_t - g_{t-1}\|_2$ separately on boundary and interior samples.
-Theoretically $\alpha_t = \sigma(\kappa\beta-\mu)$ gives
-$\alpha \approx 0.95$ at $\beta=1$ (big update) and
-$\alpha \approx 0.12$ at $\beta=0$ (tiny update). The
-$>0.3$ boundary / $<0.05$ interior thresholds confirm the gate
-only switches meaningfully at transitions — otherwise the MoE
-degenerates to every sample taking the same route.
-
-### 5.6 PCAR budget-quantile verification
-
-`verify_pcar_budget.py` constructs a synthetic $\beta$ sequence:
+`verify_pcar_budget.py` constructs a synthetic signal sequence:
 
 $$
-\beta_t = 0.1 \cdot B(2, 8) + 0.9 \cdot \sum_k \mathcal{N}(\mu_k, 0.02^2)\cdot \mathbb{1}[t \in W_k]
+s_t = 0.1 \cdot B(2, 8) + 0.9 \cdot \sum_k \mathcal{N}(\mu_k, 0.02^2) \cdot \mathbb{1}[t \in W_k]
 $$
 
-where $B(2,8)$ is the low-level baseline noise (simulating
-interior steps) and the $\mathcal{N}$ pulses are the transition
-events ($W_k$ are the boundary windows). On this distribution, the
-theoretical upper bound on $|\text{diff}|$ required by DKW
-convergence is $\approx 0.043$ ($n=1000$, $\delta=0.05$; see §2.4).
-The script uses a stricter $0.005$ acceptance threshold — because
-the distribution is synthetic and known, the quantile estimate
-deviates less than the DKW worst case, so the tighter threshold is
-reachable.
+where $B(2,8)$ is interior-step baseline noise and the Gaussian
+pulses are transition events. The DKW worst-case bound for this
+distribution is $\approx 0.043$ ($n=1000$, $\delta=0.05$); the
+repo uses the tighter $0.005$ threshold because the synthetic
+distribution is known and the quantile deviates well below the
+DKW worst case. All four $\epsilon$ values must pass.
 
-All four $\epsilon$ values must pass to return PASS, preventing a
-single-point accuracy that is skewed overall.
+### 5.6 Coverage
 
-### 5.7 Coverage and blind spots of the acceptance suite
+| Assertion | CPU sandbox | Needs GPU |
+| :-- | :--: | :--: |
+| InfoNCE identifiability math | ✓ | |
+| Bhattacharyya properties ($\beta \in [0,1]$, TV sandwich) | ✓ | |
+| Boundary-aware FM loss reduction | ✓ | |
+| PCAR DKW budget tracking | ✓ | |
+| End-to-end SR gains ($\Delta$, specificity) | | ✓ |
+| Latency / NFE cost | | ✓ |
+| Cross-dataset generalisation | | ✓ |
 
-| Assertion type | Covered by verification scripts | Still needs a real GPU run |
-| :-- | :-- | :-- |
-| Mathematical properties (identifiability, BC properties, DKW) | ✓ | — |
-| Per-module engineering correctness (gate magnitude, weighted loss decrease) | ✓ | — |
-| Combined gains ($\Delta$, $\Delta_{\text{specificity}}$) | ✗ | ✓ `run_eval_libero.sh` |
-| Latency / throughput | ✗ | ✓ `benchmark_latency.py` |
-| Cross-dataset robustness | ✗ | ✓ multi-task eval |
-
-### 5.8 One-liner self-check
+### 5.7 One-liner self-check
 
 ```bash
-# 5 verification scripts + 77 unit tests + 7-mode E2E smoke, all CPU-friendly
 pytest tests/ -v
-bash   scripts/smoke/smoke_phase_centric.sh
+bash scripts/smoke/smoke_phase_centric.sh
 python scripts/verification/verify_identifiability.py
 python scripts/verification/verify_phase_posterior.py
-python scripts/verification/verify_pcar_budget.py
 python scripts/verification/sanity_pace_a.py
-python scripts/verification/sanity_pace_b.py
+python scripts/verification/verify_pcar_budget.py
 ```
 
 Expected: `204 passed`; the 7-mode smoke all returns `[OK]`; the 5
