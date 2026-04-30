@@ -871,8 +871,28 @@ architecture from `configs/train/02_train_phase_and_flow.yaml`
 | `06_oracle_cliff.yaml` | — | — | — | — | — | Oracle gripper-flip signal: upper bound |
 | `07_cliff_concordance_with_boundary_reweight.yaml` | ✓ | ✓ | ✓ | ✓ | ✓ | **Full PACE v2** (paper headline) |
 
-Configs 03, 04, 05, 07 are pending until `compute_I_hat_2` /
-`compute_I_hat_3` / `compute_concordance_C` are implemented (§3.3–3.5).
+**v2.0 runnable configs**: 01, 02, 06, 07 (I^(1) = Bhattacharyya β_t is fully implemented).
+
+**Disabled configs (v2.0)**:
+
+- **Config 03** (`cliff_via_var_only`): `compute_I_hat_2` raises `NotImplementedError`.
+  Setting `pcar_input_signal="variance"` does not currently invoke
+  `PolicyVarianceEstimator.estimate()` anywhere in the training loop.
+  Behavior: identical to config 01 (no cliff detection active).
+
+- **Config 04** (`cliff_via_curvature_only`): `compute_I_hat_3` raises `NotImplementedError`.
+  `VelocityCurvatureEstimator.update()` is implemented in the cliff_detection subpackage
+  but not wired into `PhaseQFlowPolicy.forward()`.
+  Behavior: identical to config 01 (no cliff detection active).
+
+- **Config 05** (`cliff_concordance`): Concordance C_t requires all three estimators.
+  With I^(2) and I^(3) unavailable, `pcar_input_signal="concordance"` in `PCARTrigger`
+  falls back to beta_t. Behavior: nearly identical to config 02.
+
+**Target for v2.1**: Wire `PolicyVarianceEstimator` and `VelocityCurvatureEstimator`
+into `PhaseQFlowPolicy.forward()`, expose their outputs in `preds` dict,
+and route through `PCARTrigger.update_and_check()`.
+
 In the meantime the ablation dry-run pipeline (`--dry_run`) uses
 synthetic data to verify that the configuration wiring and
 statistical aggregation are correct end-to-end.

@@ -31,6 +31,17 @@ Preliminary gate::
 Dry run (CI / smoke)::
 
     python scripts/phenomenon/universality.py --dry_run --n_rollouts 5
+
+Storage-constrained run (bc_act + diffusion_policy only, ~1.5GB)::
+
+    python scripts/phenomenon/universality.py \\
+        --n_rollouts 50 --seeds 0 1 2 \\
+        --policies bc_act diffusion_policy \\
+        --output paper_figures/universality/
+
+Dry-run (no checkpoints needed, validates pipeline)::
+
+    python scripts/phenomenon/universality.py --dry_run --n_rollouts 20
 """
 
 from __future__ import annotations
@@ -399,7 +410,13 @@ def _parse_args(argv=None):
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--policies", nargs="+",
                    default=["openvla", "pi0", "bc_act", "diffusion_policy"],
-                   help="Policy names to evaluate")
+                   help=(
+                       "Policy names to evaluate. "
+                       "NOTE: openvla (~14GB) and pi0 (~4GB) require large checkpoints. "
+                       "For storage-constrained environments (< 200GB free), use: "
+                       "--policies bc_act diffusion_policy "
+                       "Full four-policy run requires ~220GB of baseline checkpoints."
+                   ))
     p.add_argument("--output", type=Path, default=Path("paper_figures/universality"))
     p.add_argument("--pearson_threshold", type=float, default=0.6,
                    help="Min pairwise Pearson r for preliminary PASS")

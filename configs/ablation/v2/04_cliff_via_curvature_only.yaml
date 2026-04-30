@@ -1,3 +1,17 @@
+# ============================================================
+# STATUS: PENDING IMPLEMENTATION (placeholder only)
+#
+# compute_I_hat_3 (VelocityCurvatureEstimator) raises NotImplementedError.
+# This config cannot produce real results until I^(3) is implemented.
+#
+# Current behavior: pcar_input_signal="curvature" wired but
+# VelocityCurvatureEstimator.update() is never invoked in the
+# training loop → effectively identical to 01_bc_chunked.
+#
+# DO NOT cite numbers from this config in the paper.
+# Target: re-enable in v2.1 after compute_I_hat_3 is implemented.
+# ============================================================
+
 # Ablation 4: Cliff detection via I^(3) only (velocity-field curvature).
 #
 # PCAR is triggered by the velocity-curvature estimator signal
@@ -26,3 +40,5 @@ phaseqflow:
   use_bid_sampling: false
   use_pace_c: false
   use_pace_b: false
+
+  _status: "pending_i_hat_3"

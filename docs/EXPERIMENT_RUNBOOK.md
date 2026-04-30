@@ -428,7 +428,33 @@ share the **same vision encoder + tokenizer** from stage 1, so you re-use
 > functions are unblocked, only rows **01, 02, 06** can produce real numbers;
 > the others currently raise `NotImplementedError`.
 
+> **⚠️ Disabled configs (v2.0)**
+>
+> | Config | Status | Reason |
+> |--------|--------|--------|
+> | 03 `cliff_via_var_only` | ❌ Disabled | `compute_I_hat_2` → `NotImplementedError` |
+> | 04 `cliff_via_curvature_only` | ❌ Disabled | `compute_I_hat_3` → `NotImplementedError` |
+> | 05 `cliff_concordance` | ⚠️ Partial | Falls back to I^(1) only; ≈ config 02 |
+>
+> **Runnable in v2.0**: configs 01, 02, 06, 07 only (4 × 3 seeds = 12 runs).
+> Total GPU time estimate on H800: ~35h (vs. ~60h for full 7-config matrix).
+
 ### 7.2 Single ablation row (one config × one seed)
+
+**For v2.0 (storage-constrained, I^2/I^3 pending), run only these four configs:**
+
+```bash
+# Runnable configs in v2.0 (I^1 implemented)
+RUNNABLE_CONFIGS=(
+    "01_bc_chunked"
+    "02_cliff_via_beta_only"
+    "06_oracle_cliff"
+    "07_cliff_concordance_with_boundary_reweight"
+)
+```
+
+For configs 03/04/05 (pending), the placeholder JSON files are auto-generated
+by `scripts/aggregate_ablation.py` with `pending: true` flag.
 
 ```bash
 ABL_ID=05_cliff_concordance         # change this per row
@@ -827,6 +853,31 @@ itself currently raise `NotImplementedError` — see
 
 Run the unblocked rows now; the blocked rows will be re-runnable as soon as
 the pending decisions land, without changes to this runbook.
+
+### Storage-constrained deployment (< 250GB disk)
+
+For environments with limited disk space (e.g., 250GB on cloud GPUs):
+
+1. **Baseline checkpoints**: Skip `openvla` (~14GB) and `pi0` (~4GB).
+   Use `bc_act` + `diffusion_policy` (~1.5GB total) for universality experiment.
+
+2. **Ablation matrix**: Run only configs 01, 02, 06, 07 (12 GPU runs).
+   Configs 03/04/05 are disabled anyway due to `NotImplementedError`.
+
+3. **Phase B (optional)**: After Phase A completes, delete LIBERO datasets
+   (~130GB freed) before downloading baseline checkpoints for universality.
+
+4. **SimplerEnv**: Skip entirely (requires ManiSkill2, not core to paper claims).
+
+5. **LIBERO-Perturbed**: Skip (supplementary, not required for Table 1/2).
+
+Minimum viable experiment set for CoRL submission:
+- Stage 1+2+3 training (~27h on H800)
+- Ablation 01/02/06/07 × 3 seeds (~35h)
+- §6.2 Regret Scaling (~3h, real data)
+- §6.5 Boundary Loss Ratio (~1h, real data)
+- §6.1/6.3/6.4 dry_run (pipeline validation)
+Total: ~70h ≈ ¥620 on H800
 
 ---
 

@@ -147,6 +147,22 @@ _METHODS = [
 ]
 _BASELINE_METHOD = "01_bc_chunked"
 
+# Configs that cannot produce real results due to NotImplementedError
+# These are included in output CSVs but marked as placeholder
+_PENDING_METHODS = {
+    "03_cliff_via_var_only":       "compute_I_hat_2 NotImplementedError",
+    "04_cliff_via_curvature_only": "compute_I_hat_3 NotImplementedError",
+    "05_cliff_concordance":        "concordance requires I^2+I^3 (partial: I^1 only)",
+}
+
+# Methods with real GPU results (Phase A training)
+_REAL_METHODS = [
+    "01_bc_chunked",
+    "02_cliff_via_beta_only",
+    "06_oracle_cliff",
+    "07_cliff_concordance_with_boundary_reweight",
+]
+
 
 def _load_eval_results(input_root: Path) -> Dict[str, Dict[str, np.ndarray]]:
     """Load per-seed success rates: {method: {benchmark: np.ndarray(n_seeds)}}."""
@@ -234,7 +250,12 @@ def _write_latex(rows: List[Dict], output_path: Path) -> None:
     lines = [
         r"\begin{table}[t]",
         r"\centering",
-        r"\caption{Ablation study (IQM ± 95\% CI). BC-Chunked is the baseline.}",
+        (
+            r"\caption{Ablation study (IQM ± 95\% CI). BC-Chunked is the baseline. "
+            r"\textdagger{}~Results marked with dagger are placeholder values: "
+            r"compute\_I\_hat\_2 and compute\_I\_hat\_3 raise NotImplementedError "
+            r"in the current implementation; these configs will be re-evaluated in v2.1.}"
+        ),
         r"\label{tab:ablation_v2}",
         r"\resizebox{\textwidth}{!}{",
         r"\begin{tabular}{l" + "c" * len(benchmarks_sorted) + "}",
@@ -248,6 +269,8 @@ def _write_latex(rows: List[Dict], output_path: Path) -> None:
 
     for method in _METHODS:
         display = _METHOD_DISPLAY.get(method, method)
+        if method in _PENDING_METHODS:
+            display = r"\textdagger{} " + display  # dagger = pending implementation
         cells = []
         for bm in benchmarks_sorted:
             key = (method, bm)
@@ -328,7 +351,8 @@ def main(argv=None) -> int:
     print(f"\n{'Method':45s}  {'Benchmark':15s}  {'IQM':6s}  {'95% CI':15s}  {'Cohen d':8s}")
     for r in rows:
         ci = f"[{r['CI_lower']:.3f}, {r['CI_upper']:.3f}]"
-        print(f"  {r['method']:43s}  {r['benchmark']:15s}  {r['IQM']:.3f}  {ci:15s}  {r['cohens_d']}")
+        status = " [PENDING]" if r['method'] in _PENDING_METHODS else ""
+        print(f"  {r['method']:43s}  {r['benchmark']:15s}  {r['IQM']:.3f}  {ci:15s}  {r['cohens_d']}{status}")
     return 0
 
 

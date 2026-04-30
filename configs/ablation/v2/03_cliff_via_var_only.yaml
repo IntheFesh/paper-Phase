@@ -1,3 +1,17 @@
+# ============================================================
+# STATUS: PENDING IMPLEMENTATION (placeholder only)
+#
+# compute_I_hat_2 (PolicyVarianceEstimator) raises NotImplementedError.
+# This config cannot produce real results until I^(2) is implemented.
+#
+# Current behavior: pcar_input_signal="variance" is wired but
+# PolicyVarianceEstimator.estimate() is not called anywhere in
+# the training loop → effectively identical to 01_bc_chunked.
+#
+# DO NOT cite numbers from this config in the paper.
+# Target: re-enable in v2.1 after compute_I_hat_2 is implemented.
+# ============================================================
+
 # Ablation 3: Cliff detection via I^(2) only (action-ensemble variance).
 #
 # PCAR is triggered by the policy variance estimator signal (i_hat_2 = -sigma_t^2).
@@ -26,3 +40,6 @@ phaseqflow:
   use_bid_sampling: false
   use_pace_c: false
   use_pace_b: false
+
+  # PLACEHOLDER: results from this config are synthetic until I^(2) is implemented
+  _status: "pending_i_hat_2"
