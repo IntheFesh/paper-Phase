@@ -1,0 +1,24 @@
+# Stage 1 of 3: pretrain multimodal tokenizer + cross-attention
+# No phase-centric features; trains vision/language/state tokenization.
+policy: phaseqflow
+stage: pretrain_multimodal
+notes: >
+  Train vision tokenizer and cross-attention backbone with frozen vision
+  backbone.  Phase-centric innovations are all disabled.
+phaseqflow:
+  freeze_vision_encoder: true
+  use_vision_adapter: true
+  weak_phase_supervision_mode: latent
+  use_value_guided_weight: false
+  flow_steps: 1
+  dit_num_layers: 2
+  use_chunk_infonce: false
+  use_phase_boundary_posterior: false
+  use_pace_a: false
+  use_pace_b: false
+  use_pace_c: false
+  use_pcar: false
+losses:
+  vision_state_contrastive: 1.0
+  masked_modeling: 0.5
+  future_token_prediction: 0.5

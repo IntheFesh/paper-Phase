@@ -56,6 +56,48 @@ internally, yielding N distinct action predictions.  Default N=8.
 
 ## Phase Completion Log
 
+### Phase C Completed 2026-04-30
+
+**§3.1  HierarchicalPlanner** (`modeling_phaseqflow.py`)
+- `FSQSkillEncoder` accepts optional `levels` override param (backward compat)
+- `HierarchicalPlanner` adds `phase_mode: "flat"|"hierarchical"` switch in `__init__`
+- Hierarchical mode: macro encoder (K₁=20, levels=[5,4]) + micro encoder (K₂=30, levels=[6,5])
+- Forward returns extra keys: `z_macro_idx`, `z_micro_idx`, `e_macro`, `e_micro`, `logits_macro`, `logits_micro`
+- `phase_logits`/`phase_embed` remain the macro equivalents (backward compat)
+- Config fields added: `phase_mode="flat"`, `fsq_levels_macro=[5,4]`, `fsq_levels_micro=[6,5]`
+
+**§3.2  Hierarchical InfoNCE** (`phase_centric/identifiability.py`)
+- `ChunkInfoNCEHead` upgraded: `_single_level_infonce` extracted, `_encode_chunk` extracted
+- `forward(logits_micro=None)` — hierarchical path: `L_total = L_macro + 0.5 * L_micro`
+- Flat mode (logits_micro=None) backward compatible; same-phase masking on both levels
+
+**§3.3  Boundary-Aware Flow Loss** (`phase_centric/boundary_aware_flow.py`)
+- New file: `compute_boundary_aware_flow_loss` — w(β)=1+λ*β weighting, no entropy term
+- `pace_a_loss.py` → shim re-exporting from `boundary_aware_flow` + fully backward-compat `compute_pace_a_flow_loss` (entropy preserved for ablation tests)
+- `compute_loss` uses `beta_micro` (micro posterior) if available; falls back to `phase_beta`
+- Config: `use_boundary_reweight=True`, `boundary_reweight_lambda=0.5`
+
+**§3.4  4→3-stage curriculum** (`configs/train/`)
+- `01_pretrain_multimodal.yaml`, `02_train_phase_and_flow.yaml`, `03_finetune_replan.yaml`
+- Old YAML files deprecated with header; `scripts/train.py` with `--stage`/`--smoke_mode`
+- Stage 3 `calibration_only=True` skips gradient updates
+
+**§3.5  Calibration + B-PCAR** (`phase_centric/b_pcar.py`, `_pcar_common.py`)
+- `_pcar_common.py`: shared rolling-quantile + budget utilities
+- `b_pcar.py`: `BayesianPCARTrigger` — Beta-mixture prior + quantile trigger dual path
+- `scripts/calibration/calibrate_concordance.py`: W × θ_C sweep with recall/FPR
+- `scripts/calibration/calibrate_b_pcar.py`: budget × α_prior sweep
+
+**§3.6  Sanity runs**: all 3 stages pass `--smoke_mode`
+- `_infer_planner_k` fixed to read `fsq_levels_macro` in hierarchical mode
+- `PhasePosteriorEstimator` accepts `k_override` for micro-level instance
+
+- Tests: 123 passed (unchanged — all Phase B tests still pass)
+- Smoke: 7-mode all pass
+- New dependencies introduced: none
+
+---
+
 ### Phase B (full) Completed 2026-04-30
 
 **§2.1  PosteriorBhattacharyyaEstimator** (`cliff_detection/posterior_bhattacharyya.py`)

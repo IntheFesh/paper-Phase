@@ -189,6 +189,13 @@ class PhaseQFlowConfig(PreTrainedConfig):
     curriculum_max_boundaries_stage1: int = 1
     curriculum_max_boundaries_stage2: int = 3
 
+    # Phase C: hierarchical FSQ encoder + boundary-aware flow loss
+    phase_mode: str = "flat"  # "flat" (default/ablation) or "hierarchical" (Phase C)
+    fsq_levels_macro: List[int] = field(default_factory=lambda: [5, 4])  # K1=20
+    fsq_levels_micro: List[int] = field(default_factory=lambda: [6, 5])  # K2=30
+    use_boundary_reweight: bool = True   # enable w(β^micro) weighting; ablation=False
+    boundary_reweight_lambda: float = 0.5  # λ_β in w(β) = 1 + λ*β
+
     use_pcar: bool = False
     pcar_input_signal: str = "concordance"  # "concordance" (PACE v2) or "beta" (legacy)
     pcar_change_threshold: float = 0.4

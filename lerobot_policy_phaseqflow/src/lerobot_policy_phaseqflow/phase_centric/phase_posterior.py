@@ -40,7 +40,7 @@ None, and forward skips this branch; behaviour stays identical to Round 1-3.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -52,14 +52,21 @@ from ..configuration_phaseqflow import PhaseQFlowConfig
 def _infer_planner_k(cfg: PhaseQFlowConfig) -> int:
     """Infer the planner's ``K`` (matches ``ChunkInfoNCEHead``'s rule).
 
-    ``preds["phase_logits"]`` comes out of HierarchicalPlanner with its last
-    dim set by the discrete encoder: ``K = prod(fsq_levels)`` under FSQ,
-    ``K = num_skills`` under Gumbel. ``cfg.num_phases`` is a semantic field
-    (the 4 human-task phases) and does *not* match the planner logits dim,
-    so it must not be used here.
+    In hierarchical mode (``phase_mode="hierarchical"``), the planner emits
+    macro-level logits of size K₁ = prod(fsq_levels_macro).  In flat mode the
+    full FSQ codebook size K = prod(fsq_levels) is used.
+    ``cfg.num_phases`` is a semantic field and must not be used here.
     """
-
     if bool(getattr(cfg, "use_fsq", False)):
+        phase_mode = str(getattr(cfg, "phase_mode", "flat"))
+        if phase_mode == "hierarchical":
+            levels_macro = list(getattr(cfg, "fsq_levels_macro", [5, 4]))
+            if not levels_macro:
+                raise ValueError("hierarchical mode requires non-empty fsq_levels_macro.")
+            k = 1
+            for lv in levels_macro:
+                k *= int(lv)
+            return k
         levels = list(getattr(cfg, "fsq_levels", []))
         if not levels:
             raise ValueError("use_fsq=True requires non-empty fsq_levels.")
@@ -92,8 +99,17 @@ class PhasePosteriorEstimator(nn.Module):
         - ``use_fsq`` / ``fsq_levels`` / ``num_skills`` for inferring K
     """
 
-    def __init__(self, cfg: PhaseQFlowConfig) -> None:
-        """Validate alpha, derive K, and initialise the running posterior."""
+    def __init__(self, cfg: PhaseQFlowConfig, k_override: Optional[int] = None) -> None:
+        """Validate alpha, derive K, and initialise the running posterior.
+
+        Parameters
+        ----------
+        cfg : PhaseQFlowConfig
+            Policy configuration.
+        k_override : int, optional
+            When provided, use this value as K instead of inferring it from
+            ``cfg`` (useful for the micro-level posterior in hierarchical mode).
+        """
         super().__init__()
         self.cfg = cfg
         self.alpha = float(cfg.phase_posterior_smooth_alpha)
@@ -101,7 +117,7 @@ class PhasePosteriorEstimator(nn.Module):
             raise ValueError(
                 f"phase_posterior_smooth_alpha must be in (0, 1]; got {self.alpha}"
             )
-        self.K = _infer_planner_k(cfg)
+        self.K = k_override if k_override is not None else _infer_planner_k(cfg)
         self.register_buffer(
             "_running_p",
             torch.full((1, self.K), 1.0 / self.K),

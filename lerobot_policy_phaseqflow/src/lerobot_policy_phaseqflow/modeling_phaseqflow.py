@@ -56,19 +56,41 @@ class FSQSkillEncoder(nn.Module):
         consumed by downstream ``F.cross_entropy`` with manual phase labels.
     """
 
-    def __init__(self, input_dim: int, cfg: PhaseQFlowConfig) -> None:
-        """Build the projection, FSQ quantizer, and code to phase_embed table."""
+    def __init__(
+        self,
+        input_dim: int,
+        cfg: PhaseQFlowConfig,
+        levels: Optional[List[int]] = None,
+    ) -> None:
+        """Build the projection, FSQ quantizer, and code to phase_embed table.
+
+        Parameters
+        ----------
+        input_dim : int
+            Dimension of the input (fused_obs).
+        cfg : PhaseQFlowConfig
+            Used for ``fsq_levels`` / ``fsq_dim`` / ``skill_embedding_dim`` when
+            ``levels`` is not provided explicitly.
+        levels : list of int, optional
+            Override the FSQ levels instead of reading from ``cfg.fsq_levels``.
+            When given, ``fsq_dim`` validation is skipped.  Used by the
+            hierarchical planner for macro/micro encoders.
+        """
         super().__init__()
         from vector_quantize_pytorch import FSQ
 
-        if int(cfg.fsq_dim) != len(cfg.fsq_levels):
-            raise ValueError(
-                f"fsq_dim ({cfg.fsq_dim}) must equal len(fsq_levels) ({len(cfg.fsq_levels)})"
-            )
+        if levels is not None:
+            self.levels = list(levels)
+        else:
+            if int(cfg.fsq_dim) != len(cfg.fsq_levels):
+                raise ValueError(
+                    f"fsq_dim ({cfg.fsq_dim}) must equal len(fsq_levels) ({len(cfg.fsq_levels)})"
+                )
+            self.levels = list(cfg.fsq_levels)  # type: ignore[valid-type]
+
         self.cfg = cfg
-        self.levels: List[int] = list(cfg.fsq_levels) # type: ignore[valid-type]
         self.codebook_size = int(np.prod(self.levels))
-        self.proj = nn.Linear(input_dim, int(cfg.fsq_dim))
+        self.proj = nn.Linear(input_dim, len(self.levels))
         self.fsq = FSQ(levels=self.levels)
         self.code_embed = nn.Embedding(
             num_embeddings=self.codebook_size,
@@ -699,12 +721,24 @@ class DualBackboneVisionTokenizer(nn.Module):
 class HierarchicalPlanner(nn.Module):
     """Discrete phase + continuous skill latent planner.
 
-    The flag ``config.use_fsq`` selects between the FSQ discrete-phase encoder
-    :class:`FSQSkillEncoder` and the Gumbel-Softmax :class:`SkillVQEncoder`.
-    When FSQ is enabled, the phase embedding table reuses the FSQ encoder's
-    internal ``code_embed`` (size = ``prod(fsq_levels)``); otherwise an
-    ``nn.Embedding(num_skills, ...)`` is used. External output keys stay the
-    same: ``(phase_id, phase_logits, phase_embed, skill_latent)``.
+    Supports two phase encoding modes selected by ``config.phase_mode``:
+
+    ``"flat"`` (ablation)
+        Single FSQ with ``config.fsq_levels`` (default ``[8,6,5]``, K=240) or
+        Gumbel-Softmax when ``use_fsq=False``.  External output keys are
+        ``{phase_id, phase_logits, phase_embed, skill_latent}``.
+
+    ``"hierarchical"`` (PACE v2 default)
+        Two separate FSQ encoders:
+        - Macro: ``config.fsq_levels_macro`` (default ``[5,4]``, K₁=20) — captures
+          coarse task phases.
+        - Micro: ``config.fsq_levels_micro`` (default ``[6,5]``, K₂=30) — captures
+          fine-grained skill transitions within a phase.
+        In hierarchical mode, ``phase_id`` / ``phase_logits`` / ``phase_embed``
+        are the macro-level equivalents (backward compatible with downstream
+        modules).  The additional keys ``z_macro_idx``, ``z_micro_idx``,
+        ``e_macro``, ``e_micro``, ``logits_macro``, ``logits_micro`` are
+        appended to the output dict.
     """
 
     def __init__(self, config: PhaseQFlowConfig) -> None:
@@ -712,14 +746,29 @@ class HierarchicalPlanner(nn.Module):
         super().__init__()
         self.config = config
         self.use_fsq = bool(getattr(config, "use_fsq", False))
-        if self.use_fsq:
+        self.phase_mode: str = str(getattr(config, "phase_mode", "flat"))
+
+        if self.phase_mode == "hierarchical" and self.use_fsq:
+            levels_macro = list(getattr(config, "fsq_levels_macro", [5, 4]))
+            levels_micro = list(getattr(config, "fsq_levels_micro", [6, 5]))
+            self.macro_encoder = FSQSkillEncoder(config.fusion_hidden_dim, config, levels=levels_macro)
+            self.micro_encoder = FSQSkillEncoder(config.fusion_hidden_dim, config, levels=levels_micro)
+            # phase_encoder / phase_embedding aliases for flat-mode compatibility
+            self.phase_encoder = self.macro_encoder
+            self.phase_embedding = self.macro_encoder.code_embed
+        elif self.use_fsq:
             self.phase_encoder = FSQSkillEncoder(config.fusion_hidden_dim, config)
             self.phase_embedding = self.phase_encoder.code_embed
+            self.macro_encoder = None  # type: ignore[assignment]
+            self.micro_encoder = None  # type: ignore[assignment]
         else:
             self.phase_encoder = SkillVQEncoder(
                 config.fusion_hidden_dim, config.num_skills, config.gumbel_temperature
             )
             self.phase_embedding = nn.Embedding(config.num_skills, config.skill_embedding_dim)
+            self.macro_encoder = None  # type: ignore[assignment]
+            self.micro_encoder = None  # type: ignore[assignment]
+
         self.skill_continuous = nn.Sequential(
             nn.Linear(config.fusion_hidden_dim, config.fusion_hidden_dim),
             nn.SiLU(),
@@ -732,8 +781,41 @@ class HierarchicalPlanner(nn.Module):
         phase_labels: Optional[torch.Tensor] = None,
         phase_mode: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Infer phase/skill latents under manual, latent, or hybrid supervision modes."""
+        """Infer phase/skill latents under manual, latent, or hybrid supervision modes.
+
+        In ``"hierarchical"`` mode the returned dict contains all flat-mode keys
+        plus ``z_macro_idx``, ``z_micro_idx``, ``e_macro``, ``e_micro``,
+        ``logits_macro``, and ``logits_micro``.
+        """
         mode = phase_mode or self.config.weak_phase_supervision_mode
+        skill_latent = self.skill_continuous(fused_obs)
+
+        if self.phase_mode == "hierarchical" and self.macro_encoder is not None:
+            z_macro_idx, _, logits_macro = self.macro_encoder(fused_obs, training=self.training)
+            z_micro_idx, _, logits_micro = self.micro_encoder(fused_obs, training=self.training)
+
+            if mode == "manual" and phase_labels is not None and torch.all(phase_labels >= 0):
+                phase_id = phase_labels.long()
+            else:
+                phase_id = z_macro_idx
+
+            e_macro = self.macro_encoder.code_embed(phase_id)
+            e_micro = self.micro_encoder.code_embed(z_micro_idx)
+
+            return {
+                "phase_id": phase_id,
+                "phase_logits": logits_macro,  # macro logits as primary (backward compat)
+                "phase_embed": e_macro,        # macro embed as primary (backward compat)
+                "skill_latent": skill_latent,
+                "z_macro_idx": z_macro_idx,
+                "z_micro_idx": z_micro_idx,
+                "e_macro": e_macro,
+                "e_micro": e_micro,
+                "logits_macro": logits_macro,
+                "logits_micro": logits_micro,
+            }
+
+        # Flat / Gumbel-Softmax path
         inferred_phase_id, _, phase_logits = self.phase_encoder(fused_obs, training=self.training)
 
         if mode == "manual" and phase_labels is not None and torch.all(phase_labels >= 0):
@@ -742,7 +824,6 @@ class HierarchicalPlanner(nn.Module):
             phase_id = inferred_phase_id
 
         phase_embed = self.phase_embedding(phase_id)
-        skill_latent = self.skill_continuous(fused_obs)
 
         return {
             "phase_id": phase_id,
@@ -1410,9 +1491,13 @@ class PhaseQFlowPolicy(nn.Module):
             self.chunk_infonce_head = ChunkInfoNCEHead(config)
 
         self.phase_posterior: Optional[nn.Module] = None
+        self.micro_posterior: Optional[nn.Module] = None
         if bool(getattr(config, "use_phase_boundary_posterior", False)):
             from .phase_centric.phase_posterior import PhasePosteriorEstimator
             self.phase_posterior = PhasePosteriorEstimator(config)
+            if str(getattr(config, "phase_mode", "flat")) == "hierarchical":
+                K_micro = int(np.prod(list(getattr(config, "fsq_levels_micro", [6, 5]))))
+                self.micro_posterior = PhasePosteriorEstimator(config, k_override=K_micro)
 
         self.pace_b_flow_head: Optional[nn.Module] = None
         if bool(getattr(config, "use_pace_b", False)):
@@ -1639,6 +1724,15 @@ class PhaseQFlowPolicy(nn.Module):
             phase_p_hat = post["p_hat"]
             phase_beta = post["beta"]
 
+        beta_micro: Optional[torch.Tensor] = None
+        if self.micro_posterior is not None and "logits_micro" in plan:
+            ml = plan["logits_micro"]
+            if ml.ndim == 3:
+                micro_post = self.micro_posterior.forward_sequence(ml)
+            else:
+                micro_post = self.micro_posterior.step(ml)
+            beta_micro = micro_post["beta"]
+
         if self.pace_b_flow_head is not None:
             flow = self.pace_b_flow_head(
                 fused_obs=fused_obs,
@@ -1685,6 +1779,8 @@ class PhaseQFlowPolicy(nn.Module):
             # Cliff-namespace public-facing interface: I_hat_1 = -beta_t
             from .phase_centric.cliff_estimators import compute_I_hat_1
             preds["I_hat_1"] = compute_I_hat_1(phase_beta)
+        if beta_micro is not None:
+            preds["beta_micro"] = beta_micro
         return preds
 
     def predict_action(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -1790,25 +1886,25 @@ class PhaseQFlowPolicy(nn.Module):
                 and "v_pred" in flow_train_out
                 and "v_target" in flow_train_out
             ):
-                from .phase_centric.pace_a_loss import compute_pace_a_flow_loss
+                from .phase_centric.boundary_aware_flow import compute_boundary_aware_flow_loss
 
-                beta_for_loss = preds["phase_beta"]
+                # Prefer micro-level beta for the boundary-reweighting signal
+                beta_for_loss = preds.get("beta_micro", preds["phase_beta"])
                 if bool(getattr(self.config, "pace_a_detach_beta", True)):
                     beta_for_loss = beta_for_loss.detach()
 
-                pace_a_out = compute_pace_a_flow_loss(
+                baf_out = compute_boundary_aware_flow_loss(
                     v_pred=flow_train_out["v_pred"],
                     v_target=flow_train_out["v_target"],
                     beta_t=beta_for_loss,
-                    lambda_weight=float(getattr(self.config, "pace_a_lambda", 2.0)),
-                    entropy_weight=float(getattr(self.config, "pace_a_entropy_weight", 0.01)),
-                    ablation_mode=str(getattr(self.config, "pace_a_ablation_mode", "full")),
+                    lambda_weight=float(getattr(self.config, "boundary_reweight_lambda", 0.5)),
+                    use_boundary_reweight=bool(getattr(self.config, "use_boundary_reweight", True)),
                 )
-                fm_loss = pace_a_out["fm_loss"]
-                pace_a_entropy_reg = pace_a_out["entropy_reg"]
-                pace_a_mean_beta = pace_a_out["mean_beta"]
-                pace_a_max_beta = pace_a_out["max_beta"]
-                flow_loss = fm_loss + sc_w * sc_loss + pace_a_entropy_reg
+                fm_loss = baf_out["fm_loss"]
+                pace_a_entropy_reg = torch.zeros((), device=actions.device)
+                pace_a_mean_beta = baf_out["mean_beta"]
+                pace_a_max_beta = baf_out["max_beta"]
+                flow_loss = fm_loss + sc_w * sc_loss
             else:
                 flow_loss = fm_loss + sc_w * sc_loss
             action_pred_for_mse = flow_train_out["action_pred"]
@@ -1918,6 +2014,7 @@ class PhaseQFlowPolicy(nn.Module):
                     fused_obs=preds["encoded_obs"],
                     action_chunk=action_chunk_for_nce,
                     phase_logits=preds["phase_logits"],
+                    logits_micro=preds.get("logits_micro"),
                 )
 
         w_flow = float(getattr(self.config, "flow_loss_weight", 0.5))
