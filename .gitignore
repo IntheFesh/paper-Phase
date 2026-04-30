@@ -38,3 +38,6 @@ outputs/
 artifacts/
 exports/
 wandb/
+
+# Paper figures and generated tables (regenerated from scripts)
+paper_figures/
