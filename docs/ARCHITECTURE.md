@@ -308,11 +308,13 @@ algorithm, and computes the permuted-agreement; threshold $\ge 0.7$
 $\tau \in [0.05, 0.2]$; smaller values risk gradient explosion and
 larger values collapse toward a uniform distribution.
 
-### 2.2 Phase posterior and Bhattacharyya boundary signal
+### 2.2 Phase posterior and Bhattacharyya boundary signal ($\hat{I}^{(1)}$)
 
-**Problem**: every downstream innovation (PACE-A/B, PCAR) needs a
-smooth, comparable, $[0,1]$-normalised "phase-boundary likelihood"
-signal $\beta_t$ rather than a hard argmax flip.
+**Problem**: the boundary-aware flow loss and PCAR both require a
+smooth, $[0,1]$-normalised boundary signal in each rollout step
+rather than a hard argmax flip. $\beta_t$ is the first cliff
+estimator ($\hat I^{(1)} = -\beta_t$) and the only one currently
+implemented end-to-end.
 
 **Method**: let $p_t \in \Delta^{K-1}$ be the instantaneous
 post-softmax phase probability and apply EMA smoothing
@@ -415,15 +417,16 @@ that $\beta$ doesn't collapse to 0 and make the weighting vacuous).
 ### 2.4 DKW convergence for PCAR budget quantile
 
 **Problem**: over-frequent replanning in long tasks wastes compute
-(each trigger costs one full flow forward pass), but being too
-conservative misses critical switching points. We want an
+(each trigger costs one additional flow forward pass), but being
+too conservative misses critical switching points. We want an
 adaptive trigger threshold with few parameters and a clean
 statistical interpretation.
 
-**Method**: maintain the rolling empirical distribution of
-$\beta$,
-$\hat F_n(x) = \tfrac{1}{n}\sum_{i=1}^{n}\mathbb{1}[\beta_i \le x]$,
-and given a budget $\epsilon \in (0, 1)$ take
+**Method**: maintain the rolling empirical distribution of the
+input cliff signal $s_t$ (= $C_t$ when concordance is fully
+implemented; $= \beta_t$ for the current $I^{(1)}$-only path),
+$\hat F_n(x) = \tfrac{1}{n}\sum_{i=1}^{n}\mathbb{1}[s_i \le x]$,
+and given a replan budget $\epsilon \in (0, 1)$ take
 
 $$
 \tau^{\text{cp}}_n
@@ -432,7 +435,7 @@ $$
 $$
 
 The trigger rule is
-$\text{replan}_t = \mathbb{1}[\beta_t > \tau^{\text{cp}}_n]$.
+$\text{replan}_t = \mathbb{1}[s_t > \tau^{\text{cp}}_n]$.
 
 **DKW convergence guarantee** (Dvoretzky–Kiefer–Wolfowitz
 inequality):
@@ -448,7 +451,7 @@ Taking $\varepsilon = \sqrt{\log(2/\delta) / (2n)}$ (the Massart
 constant), then with confidence $1-\delta$:
 
 $$
-\big|\Pr(\beta_t > \tau^{\text{cp}}_n) - \epsilon\big|
+\big|\Pr(s_t > \tau^{\text{cp}}_n) - \epsilon\big|
   \le \sqrt{\frac{\log(2/\delta)}{2n}}
 $$
 
@@ -464,35 +467,41 @@ threshold $\tau^{\text{cp}} = 0.4$ (`pcar_change_threshold`) to
 dodge the noisy early quantile.
 
 **Comparison with a static threshold**: a static $\tau = 0.4$
-swings the replan rate dramatically as the task's $\beta$
-distribution shifts (easy task <1%, hard task >30%); the
-budget-quantile design keeps the rate locked to
-$\epsilon \pm O(1/\sqrt{n})$ across tasks.
+swings the replan rate dramatically as the task's signal
+distribution shifts across tasks; the budget-quantile design keeps
+the actual rate locked to $\epsilon \pm O(1/\sqrt{n})$.
 
 ### 2.5 Theory synthesis: how the four pillars connect
 
 ```
-            ┌──────────────── (§2.1 identifiability) ─────────────┐
-            │  InfoNCE → phase z aligned across seeds/episodes    │
-            └─────────────────────────┬─────────────────────────┘
-                                      │ phase_logits
-                                      ▼
-            ┌──────────────── (§2.2 posterior β_t) ───────────────┐
-            │  Bhattacharyya → continuous boundary signal β_t ∈ [0,1]│
-            └─────────────────┬──────────────┬──────────────────┘
-                              │              │
-             ┌────────────────┘              └────────────────┐
-             ▼                                                ▼
-  (§2.3 PACE-A weighted FM)                    (§2.4 PCAR budget trigger)
-  w = 1 + λβ  ─►  variational bound             τ = Q(1-ε)  ─►  DKW convergence
-  fits boundary steps                            stable replan rate across tasks
+         ┌─────────────── (§2.1 identifiability) ───────────────┐
+         │   InfoNCE → phase z aligned across seeds/episodes     │
+         └───────────────────────┬───────────────────────────────┘
+                                 │ macro_logits / micro_logits
+                                 ▼
+         ┌─────────────── (§2.2 I^(1) = β_t  IMPLEMENTED) ──────┐
+         │   Bhattacharyya EMA → β_t ∈ [0, 1]                    │
+         └───────────┬───────────────────────────────────────────┘
+                     │                          (§3 cliff branch)
+         ┌───────────┴──────────────────────────────────────────┐
+         │   I^(2) = -σ_t²     (PENDING: variance estimator)    │
+         │   I^(3) = -||Δv||²  (PENDING: curvature estimator)   │
+         │   C_t = ⅓ Σ rank_W(I^(k))  (PENDING: concordance)   │
+         └───────────┬──────────────────────────────────────────┘
+                     │ s_t  (= C_t when complete; = β_t today)
+           ┌─────────┴──────────┐
+           ▼                    ▼
+  (§2.3 boundary-aware FM)   (§2.4 PCAR budget trigger)
+  w = 1 + λβ_t               τ = Q̂_n(1-ε)  →  DKW convergence
+  fits phase boundaries       stable replan rate across tasks
 ```
 
-Upstream supplies an identifiable $z$ → the middle stage converts
-$z$ into a continuous $\beta$ → downstream training (PACE-A/B/C)
-and inference (PCAR) share that same signal. This "shared $\beta$"
-design is the core distinction between the Phase-Centric family and
-ad-hoc heuristics like PhaseNet or MoE routers.
+The shared design principle: an identifiable discrete $z$ is
+converted to a continuous boundary signal; that signal drives both
+training (boundary-aware flow loss) and inference (PCAR). The
+three-estimator concordance in §3 extends this single signal to
+a more robust joint detector once $I^{(2)}$ and $I^{(3)}$ are
+implemented.
 
 ---
 
