@@ -85,7 +85,7 @@ def _try_rliable_ci(
         iqms, cis = rly.get_interval_estimates(
             score_dict, aggregate_fn, reps=n_bootstrap
         )
-        return float(iqms["method"][0]), float(cis["method"][0][0]), float(cis["method"][0][1])
+        return float(iqms["method"]), float(cis["method"][0][0]), float(cis["method"][1][0])
     except ImportError:
         return None
 
