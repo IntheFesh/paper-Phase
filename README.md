@@ -35,61 +35,56 @@ environment setup through training, evaluation, and paper artifacts.
 
 ## Main Results
 
-### Table 1 — LIBERO-Long success rate vs. SOTA
+### Table 1 — LIBERO-Long success rate: published baselines
 
-Results are IQM ± 95% CI (bootstrap, 3 seeds × 50 episodes).
-Baselines reproduced from published checkpoints under identical LIBERO-Long settings.
+> **Status**: GPU evaluation not yet run. Baseline rows are taken
+> verbatim from the cited papers; PACE v2 numbers are pending a
+> completed GPU training run and will be filled in from
+> `paper_figures/ablation_v2/ablation_stats.csv`.
 
-| Method | LIBERO-Long SR | LIBERO-Spatial SR | SimplerEnv SR |
-|--------|:--------------:|:-----------------:|:-------------:|
-| BC-ACT (LeRobot) | 0.47 | 0.61 | 0.59 |
-| Diffusion Policy (LeRobot) | 0.51 | 0.63 | 0.61 |
-| OpenVLA-7B (zero-shot) | 0.38 | 0.44 | 0.53 |
-| π0 (zero-shot) | 0.43 | 0.52 | 0.57 |
-| **PACE v2 (ours)** | **0.692** | **0.727** | **0.710** |
-| Oracle cliff (upper bound) | 0.746 | 0.781 | 0.743 |
+| Method | LIBERO-Long SR | Source |
+|--------|:--------------:|:-------|
+| OpenVLA-OFT | 54.5% | arXiv 2502.19645, Table 2 |
+| π₀ | 60.0% | arXiv 2410.24164, Table 1 |
+| MoH | 57.8% | arXiv 2410.11842, Table 3 |
+| **PACE v2 config 07 (ours)** | **pending GPU run** | — |
+| Oracle cliff (config 06, upper bound) | pending GPU run | — |
 
-> Baseline numbers are from published papers / HuggingFace leaderboards and reproduced
-> on our LIBERO-Long split with the same 50-episode evaluation protocol.
-> PACE v2 rows are synthetic dry-run estimates; GPU-trained numbers will be reported
-> upon checkpoint release.
+Note: cited papers may use different LIBERO-Long splits or evaluation
+protocols. Direct numeric comparison requires a shared evaluation harness.
 
 ---
 
 ## Ablation Study (Table 2)
 
-Each configuration inherits the full architecture; only the cliff detection and
-boundary-reweighting flags are changed. IQM ± 95% bootstrap CI across 3 seeds.
+Each configuration inherits the full architecture; only cliff detection and
+boundary-reweighting flags differ. Seven configs × 3 seeds, evaluated with
+IQM ± 95% bootstrap CI (rliable-style).
 
-### LIBERO-Long
+> **Status**: all numbers below are **synthetic dry-run placeholders** generated
+> by `scripts/aggregate_ablation.py --dry_run`. They are produced by sampling
+> N(μ, 0.04) around hard-coded target means and do not represent real GPU
+> measurements. They will be replaced once GPU training on LIBERO-Long and
+> LIBERO-Spatial completes and real checkpoint outputs are aggregated.
 
-| Configuration | IQM | 95% CI | Cohen's d vs BC |
-|---------------|:---:|:------:|:---------------:|
-| BC-Chunked (baseline) | 0.520 | [0.457, 0.554] | — |
-| Cliff via β̂_t only (I^(1)) | 0.593 | [0.563, 0.630] | 1.48 |
-| Cliff via σ²_t only (I^(2)) | 0.576 | [0.550, 0.641] | 1.13 |
-| Cliff via κ_t only (I^(3)) | 0.585 | [0.574, 0.603] | 1.67 |
-| Concordance C_t (I^(1+2+3)) | 0.675 | [0.621, 0.697] | 2.48 |
-| Oracle cliff (upper bound) | 0.746 | [0.724, 0.767] | 7.46 |
-| **PACE v2 (C_t + reweight)** | **0.692** | **[0.645, 0.719]** | **5.29** |
+| Config | Description | LIBERO-Long IQM (†placeholder) | LIBERO-Spatial IQM (†placeholder) |
+|--------|-------------|:------------------------------:|:----------------------------------:|
+| 01 | BC-Chunked (baseline) | 0.520 | 0.634 |
+| 02 | Cliff via β̂_t only (I^(1)) | 0.593 | 0.690 |
+| 03 | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
+| 04 | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
+| 05 | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
+| 06 | Oracle cliff (upper bound) | 0.746 | 0.781 |
+| **07** | **PACE v2: C_t + boundary reweight** | **0.692** | **0.727** |
 
-### LIBERO-Spatial
-
-| Configuration | IQM | 95% CI | Cohen's d vs BC |
-|---------------|:---:|:------:|:---------------:|
-| BC-Chunked (baseline) | 0.634 | [0.602, 0.654] | — |
-| Cliff via β̂_t only | 0.690 | [0.677, 0.735] | 1.99 |
-| Cliff via σ²_t only | 0.676 | [0.647, 0.718] | 0.96 |
-| Cliff via κ_t only | 0.663 | [0.623, 0.690] | 0.78 |
-| Concordance C_t | 0.743 | [0.723, 0.774] | 3.18 |
-| Oracle cliff | 0.781 | [0.757, 0.810] | 4.26 |
-| **PACE v2 (C_t + reweight)** | **0.727** | **[0.713, 0.773]** | **4.10** |
+† Configs 03–05, 07 are also pending implementation of `compute_I_hat_2`,
+`compute_I_hat_3`, and `compute_concordance_C` (currently `NotImplementedError`).
 
 ```bash
-# Reproduce ablation table (dry run, no checkpoint required):
+# Verify pipeline (synthetic data, no checkpoint):
 python scripts/aggregate_ablation.py --dry_run
 
-# Real run after GPU training:
+# Real aggregation after GPU training:
 python scripts/aggregate_ablation.py \
     --input_root outputs/ablation_v2 \
     --output paper_figures/ablation_v2/
