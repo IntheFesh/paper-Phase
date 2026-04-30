@@ -102,7 +102,7 @@ latency numbers will shift with real checkpoints but trends are informative.
 | Phase posterior $\beta_t$ alignment (I2) | `python scripts/verification/verify_phase_posterior.py` | verdict: PASS |
 | PCAR budget alignment (I6) | `python scripts/verification/verify_pcar_budget.py` | $\lvert\text{diff}\rvert<0.005$ for every $\epsilon\in\{0.05,0.1,0.2,0.3\}$ |
 | PACE-A boundary reduction (I3) | `python scripts/verification/sanity_pace_a.py` | `passes_20pct_boundary_reduction: True` |
-| PACE-B gate contrast (I4) | `python scripts/verification/sanity_pace_b.py` | boundary gate L2 $>0.3$ with interior $<0.05$ |
+| PACE-B gate contrast (optional) | `python scripts/verification/sanity_pace_b.py` | boundary gate L2 $>0.3$ with interior $<0.05$ (only relevant when `use_pace_b=True`) |
 
 Statistical definitions and threshold rationale are in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.

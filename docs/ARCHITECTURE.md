@@ -1,33 +1,75 @@
 # PACE v2 Architecture
 
 > **Scope**: an architectural specification aimed at reproduction
-> engineers and algorithm reviewers. It takes the completed system
-> as its point of view and describes module signatures, tensor
-> shapes, mathematical derivations, ablation matrix, and the
-> verification suite. No development timeline, no
-> "backwards-compatibility" prose.
+> engineers and algorithm reviewers. It takes the current PACE v2
+> codebase as its reference point and describes module signatures,
+> tensor shapes, the cliff-detection theory, the seven-config
+> ablation matrix, and the verification suite. The four headings
+> below mirror the source-code organisation under
+> `lerobot_policy_phaseqflow/` and `configs/`.
 
 ---
 
 ## Contents
 
 - [§1 System Architecture](#1-system-architecture)
+  - [1.1 Data flow](#11-data-flow-overview)
+  - [1.2 Tensor shapes](#12-tensor-shape-table)
+  - [1.3 Module signatures](#13-core-module-signatures)
+  - [1.4 Training stack](#14-training-stack)
+  - [1.5 Three-stage curriculum](#15-three-stage-curriculum)
 - [§2 Phase-Centric Theory Framework](#2-phase-centric-theory-framework)
-- [§3 The Six Phase-Centric Innovations in Detail](#3-the-six-phase-centric-innovations-in-detail)
-- [§4 Ablation Matrix Design](#4-ablation-matrix-design)
+  - [2.1 Phase identifiability / InfoNCE](#21-phase-identifiability-chunk-level-infonce)
+  - [2.2 Bhattacharyya β_t = I^(1)](#22-phase-posterior-and-bhattacharyya-boundary-signal-hati1)
+  - [2.3 Boundary-aware FM loss](#23-variational-lower-bound-for-pace-a-weighted-flow-matching)
+  - [2.4 DKW convergence for PCAR](#24-dkw-convergence-for-pcar-budget-quantile)
+  - [2.5 Theory synthesis](#25-theory-synthesis-how-the-four-pillars-connect)
+- [§3 Cliff Estimators, Concordance, and PCAR](#3-cliff-estimators-concordance-and-pcar)
+  - [3.1 Phase InfoNCE (implemented)](#31-phase-identifiability--chunk-level-infonce)
+  - [3.2 I^(1) Bhattacharyya β_t (implemented)](#32-hati1--bhattacharyya-boundary-signal-betat-implemented)
+  - [3.3 I^(2) Action variance (pending)](#33-hati2--action-ensemble-variance-sigma_t2-pending)
+  - [3.4 I^(3) Velocity curvature (pending)](#34-hati3--velocity-field-curvature-kappa_t-pending)
+  - [3.5 Concordance C_t (pending)](#35-concordance-c_t-pending)
+  - [3.6 PCAR](#36-pcar--predictability-cliff-adaptive-replanning)
+  - [3.7 Boundary-aware flow loss](#37-boundary-aware-flow-loss-pace-a)
+  - [3.8 Summary table](#38-summary)
+- [§4 Ablation Matrix (v2, seven configs)](#4-ablation-matrix-v2-seven-configs)
+  - [4.1 Matrix structure](#41-matrix-structure)
+  - [4.2 Design principles](#42-design-principles)
+  - [4.3 Statistical aggregation](#43-statistical-aggregation)
+  - [4.4 Specificity test](#44-falsification-design-specificity-test)
+  - [4.5 SOTA reference points](#45-sota-reference-points)
+  - [4.6 Reproduction commands](#46-reproduction-commands)
 - [§5 Verification System](#5-verification-system)
+  - [5.1 Acceptance table](#51-scriptassertionacceptance-table)
+  - [5.2 Hungarian alignment](#52-identifiability-verification-hungarian-alignment)
+  - [5.3 Posterior peak alignment](#53-posterior-verification-peak-alignment)
+  - [5.4 Boundary-aware FM loss sanity](#54-boundary-aware-flow-loss-sanity)
+  - [5.5 PCAR budget verification](#55-pcar-budget-quantile-verification)
+  - [5.6 Coverage table](#56-coverage)
+  - [5.7 Self-check commands](#57-one-liner-self-check)
 
 ---
 
 ## 1 System Architecture
 
-PACE v2 is a four-layer generative policy for long-horizon
-robotic manipulation. The observation is explicitly decomposed as
+PACE v2 is a three-layer generative policy for long-horizon
+robotic manipulation. The observation is decomposed as
 $x_t = \{V_t, S_t, L, H_t\}$ (vision, state, language, history)
-and flows through `VisionTokenizer` fusion,
-`HierarchicalPlanner` phase discretisation,
-`ShortcutFlowActionHead` action-chunk decoding, and
-`IQLChunkVerifier` closed-loop confidence arbitration.
+and flows through `DualBackboneVisionTokenizer` fusion,
+`HierarchicalPlanner` macro/micro phase discretisation, and
+`ShortcutFlowActionHead` action-chunk decoding. A separate
+**cliff-detection branch** taps off the planner and the flow
+head to produce a continuous "predictability cliff" signal that
+gates **PCAR** (PACE Closed-loop Adaptive Replanning) at
+inference time. Boundary-aware reweighting of the flow loss
+closes the loop at training time.
+
+The legacy A2C2 correction head, IQL chunk verifier, and BID
+sampler remain in the source tree but are gated off in every
+shipped config (`use_iql_verifier=false`, `use_correction_head=
+false`, `use_bid_sampling=false`). They are not part of the PACE
+v2 main path.
 
 ### 1.1 Data flow overview
 
@@ -51,63 +93,75 @@ and flows through `VisionTokenizer` fusion,
                                   │ context_tokens: (B, N_ctx, 256)
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 2 : HierarchicalPlanner                                      │
+  │  Layer 2 : HierarchicalPlanner   (phase_mode = "hierarchical")      │
   │  ─────────────────────────                                          │
-  │    FSQ (levels=[8,6,5], K=240)        ─►  phase_id   : (B,)         │
-  │      or Gumbel-Softmax (K=16)          ─►  phase_logits: (B, K)     │
-  │    Embedding(K, 32)                    ─►  phase_embed : (B, 32)    │
-  │    MLP(256→256→32)                     ─►  skill_latent: (B, 32)    │
+  │    Macro FSQ  (levels=[5,4],  K₁=20)   ─► z_macro    : (B,)         │
+  │    Micro FSQ  (levels=[6,5],  K₂=30)   ─► z_micro    : (B,)         │
+  │      (or flat FSQ K=240 / Gumbel K=16  with phase_mode = "flat")    │
+  │    Embedding(K_macro, 32)              ─► macro_embed: (B, 32)      │
+  │    Embedding(K_micro, 32)              ─► micro_embed: (B, 32)      │
+  │    InfoNCE heads (macro, micro)        ─► L_NCE_macro + 0.5·L_NCE_micro │
   └─────────────────────────────────────────────────────────────────────┘
                                   │ planner_out
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 3 : ShortcutFlowActionHead   (1-NFE at inference)            │
+  │  Layer 3 : ShortcutFlowActionHead   (4-NFE shortcut flow)           │
   │  ──────────────────────────────                                     │
-  │    cond = [fused_obs, phase_embed, skill_latent]  (B, 320→256)      │
+  │    cond = [fused_obs ⊕ macro_embed ⊕ micro_embed]  (B, 320→256)    │
   │    SmallDiT :  4 × _DiTBlock(AdaLN-Zero),  hidden=256,  heads=8     │
-  │    Training  : sample (t, d=2^{-k}), FM loss + self-consistency     │
-  │    Inference : x_1 = x_0 + v_θ(x_0, 0, 1 | cond),  1-NFE            │
-  │                                                                     │
+  │    Training : sample (t, d=2^{-k}); boundary-aware FM loss          │
+  │               L_FM = mean[(1 + λ·β_t^micro) · ||v_θ - v*||²]        │
+  │               + self-consistency L_sc                               │
+  │    Inference: x_1 = x_0 + v_θ(x_0, 0, 1 | cond),  4-NFE shortcut    │
   │    ──►  action chunk  A_t ∈ R^{Ta × Da}  =  (B, 16, 16)             │
   └─────────────────────────────────────────────────────────────────────┘
-                                  │ base_chunk
+                                  │ A_t
                                   ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 3b : A2C2CorrectionHead  (finetune_closedloop only)          │
-  │  ─────────────────────────────                                      │
-  │    DiT (hidden=640, 4 layers, 8 heads)                              │
-  │    input:  [obs_feat ⊕ base_chunk ⊕ step_norm]                      │
-  │    output: residual Δ_t                                             │
-  │    ──►  corrected_chunk = base_chunk + Δ_t                          │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 4 : IQLChunkVerifier                                         │
-  │  ─────────────────────────                                          │
-  │    V_ψ(s, z)            ─► (B,)     expectile τ=0.8                 │
-  │    Q_θ(s, A, z)         ─► (B,)     TD(0) backup, γ=0.99            │
-  │    advantage = Q − V                                                │
-  │    confidence = σ(β · advantage),   β=3.0                           │
-  │    should_replan = (confidence < 0.5)                               │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Test-time :  BID sampler (N=5) → ACT temporal ensembling           │
-  │               exponential decay  w_i = exp(−m · age),  m=0.05       │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
+                       (executed for ≤ H steps, or
+                        until PCAR fires a replan)
+
+           ┌──── parallel cliff branch (read-only) ──────────────┐
+           │                                                     │
+           │  I^(1)  =  -β_t                                     │
+           │            (PhasePosteriorEstimator, IMPLEMENTED)   │
+           │                                                     │
+           │  I^(2)  =  -σ_t²    [PolicyVarianceEstimator]       │
+           │            (anchor multi-sample; PENDING)           │
+           │                                                     │
+           │  I^(3)  =  -||v_θ(c_t) - v_θ(c_{t-1})||²            │
+           │            (VelocityCurvatureEstimator; PENDING)    │
+           │                                                     │
+           │  Concordance  C_t  =  1/3 · Σ_k rank_W(I^(k))      │
+           │                       (PENDING; rank-window W=50)   │
+           │                                                     │
+           │  PCAR trigger:  budget-quantile  τ_t = Q̂_n(1-ε)    │
+           │                 replan ⇔ C_t > τ_t                  │
+           │                 (or BayesianPCARTrigger Beta-mix)   │
+           └─────────────────────────────────────────────────────┘
+                                  │  replan? → re-encode obs and rerun L1-L3
                                   ▼
                           a_t ∈ R^{Da}   (executed)
 ```
+
+**Implementation status caveat.** Of the three cliff estimators
+only $I^{(1)}$ (Bhattacharyya $\beta_t$) is currently
+implemented end-to-end. The public cliff-namespace functions
+`compute_I_hat_2`, `compute_I_hat_3`, and `compute_concordance_C`
+in
+`lerobot_policy_phaseqflow/phase_centric/cliff_estimators.py`
+raise `NotImplementedError`; their algorithmic details are
+specified below in §3 but the multi-sample anchor mechanism for
+$I^{(2)}$ and the velocity-anchor exposure for $I^{(3)}$ are
+still open. Until those are landed, ablations 03/04/05/07 fall
+back to whichever signal `pcar_input_signal` resolves to inside
+`PCARTrigger` (defaulting to $\beta_t$).
 
 ### 1.2 Tensor shape table
 
 Conventions: $B$ batch, $V$ number of cameras ($=2$), $T_a$ action
 chunk length ($=16$), $D_a$ action dimension ($=16$), $D=256$
-fusion hidden size, $K$ phase codebook size,
-$L_{\text{tok}}=16$ T5 token count.
+fusion hidden size, $K_1=20$ macro / $K_2=30$ micro phase codebook
+sizes, $L_{\text{tok}}=16$ T5 token count.
 
 | Stage | Tensor | Shape | Note |
 | :-- | :-- | :-- | :-- |
@@ -122,61 +176,72 @@ $L_{\text{tok}}=16$ T5 token count.
 | L1 | `language_tokens` | $(B, 1, 256)$ | T5 mean-pool + FiLM |
 | L1 | `fused_obs` | $(B, 256)$ | uncertainty-gate output |
 | L1 | `context_tokens` | $(B, N_{\text{ctx}}, 256)$ | $[s, h, l, r]$ concat |
-| L2 | `phase_logits` | $(B, K)$ | $K=240$ (FSQ) / $16$ (Gumbel) |
-| L2 | `phase_id` | $(B,)$ | long tensor |
-| L2 | `phase_embed` | $(B, 32)$ | `Embedding(K, 32)` |
-| L2 | `skill_latent` | $(B, 32)$ | continuous skill latent |
+| L2 | `macro_logits` | $(B, K_1)$ | K₁=20 (hierarchical) |
+| L2 | `micro_logits` | $(B, K_2)$ | K₂=30 (hierarchical) |
+| L2 | `z_macro / z_micro` | $(B,)$ | discrete phase ids |
+| L2 | `macro_embed / micro_embed` | $(B, 32)$ | `Embedding(K, 32)` |
 | L3 | FM input $x_t$ | $(B, T_a, D_a)$ | training |
-| L3 | cond vector | $(B, 256)$ | `conditioner([obs, z^p, z^s])` |
-| L3 | `action_pred` | $(B, 16, 16)$ | one forward pass |
-| L3b | residual | $(B, 16, 16)$ | A2C2 output |
-| L4 | $V_\psi$ | $(B,)$ | state-value |
-| L4 | $Q_\theta$ | $(B,)$ | state-action value |
-| L4 | `chunk_confidence` | $(B,)$ | $\sigma(\beta \cdot A)$ |
-| rollout | BID candidates | $(N, T_a, D_a)$ | $N=5$ |
-| rollout | executed action | $(D_a,)$ | averaged by ensembler |
+| L3 | cond vector | $(B, 256)$ | `conditioner([obs ⊕ z^macro ⊕ z^micro])` |
+| L3 | `action_pred` | $(B, 16, 16)$ | 4-NFE shortcut decoding |
+| Cliff | $\beta_t$ | $(B,)$ | $1-\sum_k\sqrt{\hat p_t \hat p_{t-1}}$, micro-level |
+| Cliff | $\sigma_t^2$ | $(B,)$ | per-step ensemble variance (PENDING) |
+| Cliff | $\kappa_t$ | $(B,)$ | velocity-anchor $L^2$ jump (PENDING) |
+| Cliff | $C_t$ | $(B,)$ | rank-window mean of $I^{(1/2/3)}$ (PENDING) |
+| PCAR | `should_replan` | $(B,)$ bool | scalar threshold check |
 
 ### 1.3 Core module signatures
 
-All modules are defined in
+The L1/L2/L3 modules are defined in
 `lerobot_policy_phaseqflow/src/lerobot_policy_phaseqflow/modeling_phaseqflow.py`;
-the Phase-Centric sub-modules live in the sibling
+the cliff-detection sub-modules live in the sibling
 `phase_centric/` subpackage.
 
 ```python
 class DualBackboneVisionTokenizer(nn.Module):
-    # modeling_phaseqflow.py:335
+    # modeling_phaseqflow.py
     def forward(self, images, states, language_ids, language_mask,
                 history, masks) -> Dict[str, Tensor]:
         # keys: fused, context_tokens, vision_tokens, state_tokens,
         #       language_tokens, history_tokens, uncertainty_gate
 
 class HierarchicalPlanner(nn.Module):
-    # modeling_phaseqflow.py:723
+    # modeling_phaseqflow.py
     def forward(self, fused_obs, phase_labels=None,
                 phase_mode=None) -> Dict[str, Tensor]:
-        # keys: phase_id, phase_logits, phase_embed, skill_latent
+        # hierarchical: macro_logits, micro_logits, z_macro, z_micro,
+        #               macro_embed, micro_embed
+        # flat:         phase_logits, phase_id, phase_embed, skill_latent
 
 class ShortcutFlowActionHead(nn.Module):
-    # modeling_phaseqflow.py:899
-    def forward(self, fused_obs, phase_embed, skill_latent,
-                actions_gt=None, training=True) -> Dict[str, Tensor]:
+    # modeling_phaseqflow.py
+    def forward(self, fused_obs, macro_embed, micro_embed,
+                actions_gt=None, beta_t=None, training=True
+                ) -> Dict[str, Tensor]:
         # training keys: fm_loss, sc_loss, action_pred, v_pred, v_target
-        # inference keys: action_pred
+        # inference keys: action_pred (4-NFE shortcut)
 
-class A2C2CorrectionHead(nn.Module):
-    # modeling_phaseqflow.py:1018
-    def forward(self, obs_feat, base_chunk,
-                step_in_chunk: int | Tensor) -> Tensor:
-        # returns corrected chunk (B, Ta, Da)
+# Cliff branch (phase_centric/)
+class PhasePosteriorEstimator(nn.Module):
+    # phase_centric/phase_posterior.py
+    @staticmethod
+    def _bhattacharyya_beta(p_cur, p_prev) -> Tensor
+    def forward_sequence(phase_logits) -> {p_hat, beta}    # batched
+    def step(phase_logits_t)            -> {p_hat, beta}    # rollout
 
-class IQLChunkVerifier(nn.Module):
-    # modeling_phaseqflow.py:1146
-    def forward(self, fused_obs, predicted_action,
-                phase_embed) -> Dict[str, Tensor]:
-        # keys: v, q, advantage, chunk_confidence, should_replan
-    def compute_critic_losses(self, ...) -> Tuple[Tensor, Tensor]
-    def soft_update_target(self) -> None  # Polyak τ=0.005
+# Public cliff-namespace API (phase_centric/cliff_estimators.py)
+def compute_I_hat_1(phase_beta) -> Tensor             # IMPLEMENTED  (= -β_t)
+def compute_I_hat_2(action_samples=None)              # PENDING  (NotImplementedError)
+def compute_I_hat_3(v_theta_ct, v_theta_ct_prev)      # PENDING  (NotImplementedError)
+def compute_concordance_C(i_hat_values, window_size)  # PENDING  (NotImplementedError)
+
+class PCARTrigger:                                    # phase_centric/pcar_trigger.py
+    history: Deque[float]                              # maxlen=1000
+    warmup_min: int = 50
+    budget_eps: float = 0.1
+    def update_and_check(signal: float) -> bool        # returns replan flag
+
+class BayesianPCARTrigger:                            # phase_centric/b_pcar.py
+    # Beta-mixture posterior P(changepoint | history); same .update_and_check API
 ```
 
 ### 1.4 Training stack
@@ -186,26 +251,35 @@ class IQLChunkVerifier(nn.Module):
 | Precision | `bf16` | `adam_eps=1e-6` avoids underflow |
 | Optimizer | PagedAdamW8bit | `bitsandbytes`, falls back to `torch.optim.AdamW` |
 | $(\beta_1, \beta_2)$ | $(0.9,\ 0.95)$ | common for large models |
-| Grad clip | $\lVert g \rVert_2 \le 1.0$ | — |
+| Grad clip | $\lVert g \rVert_2 \le 1.0$ | global norm |
 | Schedule | Cosine, warmup=500 | `transformers.get_cosine_schedule_with_warmup` |
 | EMA | decay $=0.9999$, power $=0.75$ | applied only to `flow_action_head` |
-| Grad ckpt | TransformerEncoderLayer | ~35% memory savings |
+| Grad ckpt | TransformerEncoderLayer | roughly 35% memory savings |
 | Param groups | backbone / LoRA / head | lr $\in \{0,\ 5\!\times\!10^{-5},\ 10^{-4}\}$ |
-| Action norm | quantile [0.01, 0.99] → $[-1, 1]$ | RDT-style |
+| Action norm | quantile [0.01, 0.99] $\to [-1, 1]$ | RDT-style |
 | State noise | Gaussian injection at SNR $40$ dB | training regulariser |
 
-### 1.5 Four-stage curriculum
+### 1.5 Three-stage curriculum
+
+PACE v2 ships with three training stages, declared in
+`configs/train/`:
 
 | Stage YAML | Unfrozen modules | Main loss | Purpose |
 | :-- | :-- | :-- | :-- |
-| `pretrain_multimodal.yaml` | vision/language adapter | contrastive + MLM | multimodal alignment |
-| `train_latent.yaml` | planner + InfoNCE head | $\mathcal{L}_{\text{phase}}+\mathcal{L}_{\text{InfoNCE}}$ | phase codebook identifiability |
-| `train_flow.yaml` | flow action head | $\mathcal{L}_{\text{FM}}+\mathcal{L}_{\text{sc}}$ | shortcut-conditional flow |
-| `finetune_closedloop.yaml` | IQL critic + A2C2 | $\mathcal{L}_{\text{IQL}}+\mathcal{L}_{\text{A2C2}}$ | closed-loop correction |
+| `01_pretrain_multimodal.yaml` | vision/language adapter | vision–state contrastive + masked modelling + future-token prediction | multimodal token alignment; phase-centric features off |
+| `02_train_phase_and_flow.yaml` | hierarchical planner + flow head | $\mathcal{L}_{\text{imit}} + 0.5\,\mathcal{L}_{\text{flow}} + 0.1\,\mathcal{L}_{\text{InfoNCE}}^{\text{macro+micro}}$ | joint train of phase encoder and boundary-aware flow head |
+| `03_finetune_replan.yaml` | PCAR / B-PCAR / concordance-window calibration only | calibration objective on held-out LIBERO-Long split | freeze main net; tune the replanning trigger |
 
-Stage switching is driven by the `PhaseQFlowConfig.stage` field, and
-the matching `stage_freeze_*` flags control which sub-modules
-participate in backprop.
+Stage switching is driven by `PhaseQFlowConfig.stage` ($\in
+\{\texttt{pretrain\_multimodal},
+\texttt{train\_phase\_and\_flow},
+\texttt{finetune\_replan}\}$), and the corresponding
+`stage_freeze_*` and `freeze_all_main` flags decide which
+sub-modules participate in backprop. The previous four-stage
+recipe (separate `train_latent` and `train_flow` stages) was
+collapsed into stage 2 in v2 because the InfoNCE-identifiability
+loss and the boundary-aware flow loss were found to be
+co-trainable without curriculum staging.
 
 ---
 
@@ -265,11 +339,13 @@ algorithm, and computes the permuted-agreement; threshold $\ge 0.7$
 $\tau \in [0.05, 0.2]$; smaller values risk gradient explosion and
 larger values collapse toward a uniform distribution.
 
-### 2.2 Phase posterior and Bhattacharyya boundary signal
+### 2.2 Phase posterior and Bhattacharyya boundary signal ($\hat{I}^{(1)}$)
 
-**Problem**: every downstream innovation (PACE-A/B, PCAR) needs a
-smooth, comparable, $[0,1]$-normalised "phase-boundary likelihood"
-signal $\beta_t$ rather than a hard argmax flip.
+**Problem**: the boundary-aware flow loss and PCAR both require a
+smooth, $[0,1]$-normalised boundary signal in each rollout step
+rather than a hard argmax flip. $\beta_t$ is the first cliff
+estimator ($\hat I^{(1)} = -\beta_t$) and the only one currently
+implemented end-to-end.
 
 **Method**: let $p_t \in \Delta^{K-1}$ be the instantaneous
 post-softmax phase probability and apply EMA smoothing
@@ -372,15 +448,16 @@ that $\beta$ doesn't collapse to 0 and make the weighting vacuous).
 ### 2.4 DKW convergence for PCAR budget quantile
 
 **Problem**: over-frequent replanning in long tasks wastes compute
-(each trigger costs one full flow forward pass), but being too
-conservative misses critical switching points. We want an
+(each trigger costs one additional flow forward pass), but being
+too conservative misses critical switching points. We want an
 adaptive trigger threshold with few parameters and a clean
 statistical interpretation.
 
-**Method**: maintain the rolling empirical distribution of
-$\beta$,
-$\hat F_n(x) = \tfrac{1}{n}\sum_{i=1}^{n}\mathbb{1}[\beta_i \le x]$,
-and given a budget $\epsilon \in (0, 1)$ take
+**Method**: maintain the rolling empirical distribution of the
+input cliff signal $s_t$ (= $C_t$ when concordance is fully
+implemented; $= \beta_t$ for the current $I^{(1)}$-only path),
+$\hat F_n(x) = \tfrac{1}{n}\sum_{i=1}^{n}\mathbb{1}[s_i \le x]$,
+and given a replan budget $\epsilon \in (0, 1)$ take
 
 $$
 \tau^{\text{cp}}_n
@@ -389,7 +466,7 @@ $$
 $$
 
 The trigger rule is
-$\text{replan}_t = \mathbb{1}[\beta_t > \tau^{\text{cp}}_n]$.
+$\text{replan}_t = \mathbb{1}[s_t > \tau^{\text{cp}}_n]$.
 
 **DKW convergence guarantee** (Dvoretzky–Kiefer–Wolfowitz
 inequality):
@@ -405,7 +482,7 @@ Taking $\varepsilon = \sqrt{\log(2/\delta) / (2n)}$ (the Massart
 constant), then with confidence $1-\delta$:
 
 $$
-\big|\Pr(\beta_t > \tau^{\text{cp}}_n) - \epsilon\big|
+\big|\Pr(s_t > \tau^{\text{cp}}_n) - \epsilon\big|
   \le \sqrt{\frac{\log(2/\delta)}{2n}}
 $$
 
@@ -421,661 +498,616 @@ threshold $\tau^{\text{cp}} = 0.4$ (`pcar_change_threshold`) to
 dodge the noisy early quantile.
 
 **Comparison with a static threshold**: a static $\tau = 0.4$
-swings the replan rate dramatically as the task's $\beta$
-distribution shifts (easy task <1%, hard task >30%); the
-budget-quantile design keeps the rate locked to
-$\epsilon \pm O(1/\sqrt{n})$ across tasks.
+swings the replan rate dramatically as the task's signal
+distribution shifts across tasks; the budget-quantile design keeps
+the actual rate locked to $\epsilon \pm O(1/\sqrt{n})$.
 
 ### 2.5 Theory synthesis: how the four pillars connect
 
 ```
-            ┌──────────────── (§2.1 identifiability) ─────────────┐
-            │  InfoNCE → phase z aligned across seeds/episodes    │
-            └─────────────────────────┬─────────────────────────┘
-                                      │ phase_logits
-                                      ▼
-            ┌──────────────── (§2.2 posterior β_t) ───────────────┐
-            │  Bhattacharyya → continuous boundary signal β_t ∈ [0,1]│
-            └─────────────────┬──────────────┬──────────────────┘
-                              │              │
-             ┌────────────────┘              └────────────────┐
-             ▼                                                ▼
-  (§2.3 PACE-A weighted FM)                    (§2.4 PCAR budget trigger)
-  w = 1 + λβ  ─►  variational bound             τ = Q(1-ε)  ─►  DKW convergence
-  fits boundary steps                            stable replan rate across tasks
+         ┌─────────────── (§2.1 identifiability) ───────────────┐
+         │   InfoNCE → phase z aligned across seeds/episodes     │
+         └───────────────────────┬───────────────────────────────┘
+                                 │ macro_logits / micro_logits
+                                 ▼
+         ┌─────────────── (§2.2 I^(1) = β_t  IMPLEMENTED) ──────┐
+         │   Bhattacharyya EMA → β_t ∈ [0, 1]                    │
+         └───────────┬───────────────────────────────────────────┘
+                     │                          (§3 cliff branch)
+         ┌───────────┴──────────────────────────────────────────┐
+         │   I^(2) = -σ_t²     (PENDING: variance estimator)    │
+         │   I^(3) = -||Δv||²  (PENDING: curvature estimator)   │
+         │   C_t = ⅓ Σ rank_W(I^(k))  (PENDING: concordance)   │
+         └───────────┬──────────────────────────────────────────┘
+                     │ s_t  (= C_t when complete; = β_t today)
+           ┌─────────┴──────────┐
+           ▼                    ▼
+  (§2.3 boundary-aware FM)   (§2.4 PCAR budget trigger)
+  w = 1 + λβ_t               τ = Q̂_n(1-ε)  →  DKW convergence
+  fits phase boundaries       stable replan rate across tasks
 ```
 
-Upstream supplies an identifiable $z$ → the middle stage converts
-$z$ into a continuous $\beta$ → downstream training (PACE-A/B/C)
-and inference (PCAR) share that same signal. This "shared $\beta$"
-design is the core distinction between the Phase-Centric family and
-ad-hoc heuristics like PhaseNet or MoE routers.
+The shared design principle: an identifiable discrete $z$ is
+converted to a continuous boundary signal; that signal drives both
+training (boundary-aware flow loss) and inference (PCAR). The
+three-estimator concordance in §3 extends this single signal to
+a more robust joint detector once $I^{(2)}$ and $I^{(3)}$ are
+implemented.
 
 ---
 
-## 3 The Six Phase-Centric Innovations in Detail
+## 3 Cliff Estimators, Concordance, and PCAR
 
-Each innovation follows the same template: **motivation / method /
-implementation interface / relation to prior work**. Every
-innovation is controlled by an explicit feature gate in
-`PhaseQFlowConfig` (off by default) so that ablation is clean.
+The predictability cliff is the sharp drop in action-distribution
+predictability at phase boundaries (grasp → transport → place).
+PACE v2 quantifies it with three estimators, fuses them into a
+single concordance score $C_t$, and uses that score to gate
+adaptive replanning (PCAR) and to reweight the flow loss.
 
 ### 3.1 Phase Identifiability — Chunk-level InfoNCE
 
-**Motivation**: unsupervised phase-code training tends to collapse
-(van den Oord et al. 2018 VQ-VAE codebook collapse), which means
-SR/reward gains cannot be attributed to phase structure.
+**Motivation**: without explicit identifiability training the
+phase codebook collapses (all observations map to the same code),
+making phase labels incomparable across seeds and giving the cliff
+estimators no signal to work with.
 
-**Method**: treat $(o_i, a_i^{1:T_a})$ as a chunk sample, positive
-within the same phase, negative across phases:
+**Method**: treat $(o_i, a_i^{1:T_a})$ as a positive sample for
+its assigned phase code $z_i$, and all cross-phase pairs as
+negatives:
 
 $$
-\mathcal{L}_{\text{chunk-NCE}}
+\mathcal{L}_{\text{NCE}}
   = -\frac{1}{|\mathcal{V}|}\sum_{i \in \mathcal{V}}
     \log \frac{\exp(s_{ii}/\tau)}
               {\sum_{j \in \mathcal{N}(i)\cup\{i\}} \exp(s_{ij}/\tau)},
-  \quad s_{ij} = \langle f_\phi(o_i, a_i), g_\psi(z_j)\rangle
+  \quad s_{ij} = \langle f_\phi(o_i, a_i),\, g_\psi(z_j)\rangle
 $$
 
-where $\mathcal{V}$ is the set of rows that have valid negatives
-and $\tau=0.1$.
+Applied separately for macro ($K_1=20$) and micro ($K_2=30$)
+levels; total InfoNCE weight $= 0.1\,(L_{\text{NCE}}^{\text{macro}}
++ 0.5\,L_{\text{NCE}}^{\text{micro}})$ in stage 2.
 
-**Implementation interface**
+**Implementation**
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/identifiability.py
+# phase_centric/identifiability.py
 class ChunkInfoNCEHead(nn.Module):
     context_encoder: Linear(D + T_a·D_a, D) → SiLU → Linear(D, D)
     phase_embed:     Embedding(K, D)
     forward(fused_obs, action_chunk, phase_logits) -> (loss, diag)
 
-# Controlled via PhaseQFlowConfig:
-#   use_chunk_infonce = True
-#   chunk_infonce_weight = 0.5
-#   chunk_infonce_temperature = 0.1
-#   chunk_infonce_chunk_len = 8
+# PhaseQFlowConfig:
+#   use_chunk_infonce            = True
+#   chunk_infonce_weight         = 0.5
+#   chunk_infonce_temperature    = 0.1
 ```
 
-**Relation to prior work**: applies the identifiability theory of
-iVAE (Khemakhem et al., NeurIPS 2020, arXiv 1907.04809) and the
-contrastive mutual-information lower bound from CPC
-(arXiv 1807.03748) to chunk-level phase, in contrast to VQ-VAE
-(arXiv 1711.00937), which chases reconstruction only.
+**Verification**: `verify_identifiability.py` trains across 3
+seeds, aligns codebooks with the Hungarian algorithm, and requires
+permuted-agreement $\ge 0.7$ (§5.2).
 
 ---
 
-### 3.2 Phase Posterior — Bhattacharyya $\beta_t$
+### 3.2 $\hat{I}^{(1)}$ — Bhattacharyya boundary signal $\beta_t$ (IMPLEMENTED)
 
-**Motivation**: downstream modules need a continuous, normalised,
-comparable boundary signal rather than a hard argmax flip, and it
-has to update one step at a time during rollout without BPTT.
+**Definition**:
+$\hat I^{(1)}(t) = -\beta_t$, where $\beta_t \in [0,1]$ is the
+Bhattacharyya distance between consecutive smoothed phase
+posteriors.
 
-**Method**: given the instantaneous phase probability
-$p_t = \text{softmax}(\text{phase\_logits}_t)$:
+**Computation**: given $p_t = \text{softmax}(\text{micro\_logits}_t)$:
 
 $$
-\hat p_t = \alpha\, p_t + (1-\alpha)\,\hat p_{t-1},\;\alpha=0.3
+\hat p_t = 0.3\,p_t + 0.7\,\hat p_{t-1}
 \qquad
-\beta_t = 1 - \sum_{k} \sqrt{\hat p_t(k)\,\hat p_{t-1}(k)}
+\beta_t = 1 - \sum_{k=1}^{K_2} \sqrt{\hat p_t(k)\,\hat p_{t-1}(k)}
 $$
 
-Properties (see §2.2): $\beta_t \in [0,1]$, equals the Hellinger
-$H^2$ distance, and two-sided-sandwiches TV distance.
+Key properties (proved in §2.2): $\beta_t \in [0,1]$; equals
+$H^2(p,q)$ (squared Hellinger); sandwiches TV distance as
+$\beta_t/2 \le d_\text{TV} \le \sqrt{\beta_t}$.
 
-**Implementation interface**
+**Implementation**
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/phase_posterior.py
+# phase_centric/phase_posterior.py
 class PhasePosteriorEstimator(nn.Module):
     @staticmethod
-    def _bhattacharyya_beta(p_cur, p_prev) -> Tensor   # core distance
-    def forward_sequence(phase_logits)  -> {p_hat, beta}  # training: batched
-    def step(phase_logits_t)            -> {p_hat, beta}  # rollout: per step
-    def reset(batch_size)                                 # episode start
+    def _bhattacharyya_beta(p_cur, p_prev) -> Tensor
+    def forward_sequence(phase_logits) -> {p_hat, beta}   # batched
+    def step(phase_logits_t)           -> {p_hat, beta}   # per rollout step
+    def reset(batch_size)
 
-# Config:
-#   use_phase_boundary_posterior = True
-#   phase_posterior_smooth_alpha = 0.3
-#   pace_a_detach_beta = True     # gradient is detached by default
+# phase_centric/cliff_estimators.py
+def compute_I_hat_1(phase_beta: Tensor) -> Tensor   # returns -beta_t
 ```
 
-**Relation to prior work**: an HMM-style forward-only
-approximation, lighter than CRF/CTC (arXiv 1805.00157); close in
-spirit to the soft-segmentation idea of ActionFormer
-(arXiv 2202.07925), but we keep only a first-order EMA and no
-boundary regression head.
+**Config**: `use_phase_boundary_posterior = True`,
+`phase_posterior_smooth_alpha = 0.3`,
+`pace_a_detach_beta = True` (gradient detached to avoid
+interfering with InfoNCE).
+
+**Verification**: `verify_phase_posterior.py`, peak-F1 $\ge 0.5$
+at $\pm 3$-frame tolerance on 50 synthetic demos.
 
 ---
 
-### 3.3 PACE-A — Phase-aware FM reweighting
+### 3.3 $\hat{I}^{(2)}$ — Action-ensemble variance $\sigma_t^2$ (PENDING)
 
-**Motivation**: in long-horizon tasks, error concentrates at
-boundary steps (the moments of grasp/place transitions); uniform
-MSE lets the interior steady-state segments dominate the gradient.
+**Definition**:
+$\hat I^{(2)}(t) = -\sigma_t^2$, where
+$\sigma_t^2 = \frac{1}{N}\sum_{i=1}^{N}\|a_t^{(i)} - \bar a_t\|^2$
+is the variance of $N$ independent flow samples conditioned on
+the same observation.
 
-**Method**
+**Rationale**: at phase boundaries the flow-matching score
+function becomes multi-modal; independent samples spread out and
+variance spikes, signalling a cliff even before the planner's
+phase posterior shifts.
 
-$$
-\mathcal{L}_{\text{PACE-A}}
-  = \mathbb{E}\!\big[(1 + \lambda\beta_t)\,\|v_\theta - v^*\|^2\big]
-    \;-\; \eta\,\mathbb{E}[H(\beta_t)]
-$$
-
-$\lambda=2.0$, $\eta=0.01$; the ablation supports `full` /
-`no_weight` / `no_entropy`. For the variational-bound reading see
-§2.3.
-
-**Implementation interface**
+**Pending decision**: the multi-sample anchor needs $N \ge 2$
+parallel flow rollouts per step. The interface (`pcar_input_signal
+= "variance"`) is wired in `PCARTrigger.update_and_check`, but
+`compute_I_hat_2` raises `NotImplementedError` until the
+sampling strategy is resolved.
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/pace_a_loss.py
-def compute_pace_a_flow_loss(
-    v_pred, v_target, beta_t,
-    lambda_weight=2.0, entropy_weight=0.01,
-    ablation_mode="full",
-) -> {"fm_loss", "entropy_reg", "total"}
-
-# Config:
-#   use_pace_a = True
-#   pace_a_lambda = 2.0
-#   pace_a_entropy_weight = 0.01
-#   pace_a_detach_beta = True
-#   pace_a_ablation_mode = "full"  # "no_weight" / "no_entropy"
+# phase_centric/cliff_estimators.py
+def compute_I_hat_2(action_samples: Tensor) -> Tensor
+#   action_samples: (N, B, Ta, Da) — PENDING
 ```
-
-**Relation to prior work**: same family as Focal Loss
-(arXiv 1708.02002, hard-example weighting in classification) and
-BC-Z's temporal weighting (arXiv 2202.02005), but the weight comes
-from a data-driven $\beta_t$ rather than a fixed schedule.
 
 ---
 
-### 3.4 PACE-B — Phase-gated MoE
+### 3.4 $\hat{I}^{(3)}$ — Velocity-field curvature $\kappa_t$ (PENDING)
 
-**Motivation**: asking one velocity network to handle both boundary
-and interior steps overloads it; we want different experts for
-different phases with a smooth switch at transitions, avoiding the
-jitter of hard routing (the noisy top-k issue in Shazeer et al.
-2017).
+**Definition**:
+$\hat I^{(3)}(t) =
+-\|v_\theta(x_\tau, \tau, c_t) - v_\theta(x_\tau, \tau, c_{t-1})\|_2^2$,
+where $x_\tau$ is a fixed anchor noise sample and $c_t, c_{t-1}$
+are consecutive condition vectors.
 
-**Method**: $K$ expert MLPs, instantaneous router $p_t$, smooth
-gate:
+**Rationale**: if the policy's velocity field is continuous at
+interior steps but jumps at boundaries (because $c_t$ encodes a
+different phase), then the $L^2$ difference between the velocity
+field at a fixed anchor point detects the transition without
+requiring an ensemble.
 
-$$
-\alpha_t = \sigma(\kappa\,\beta_t - \mu),
-\quad
-g_t = \alpha_t \cdot p_t + (1-\alpha_t)\cdot g_{t-1}
-$$
-
-$\kappa=5.0$, $\mu=2.0$. When $\beta_t \approx 0$ then
-$\alpha\approx 0.12$ — keep the current expert; when
-$\beta_t \to 1$ then $\alpha\to 0.95$ — switch fast. The final
-velocity is
-$v_t = \sum_k g_t(k) \cdot e_k(x_t, t, d \mid c)$.
-
-**Implementation interface**
+**Pending decision**: the anchor $(x_\tau, \tau)$ must be stable
+across steps (e.g. fixed Gaussian noise drawn once per episode);
+exposing the velocity head for two consecutive condition vectors
+adds one extra forward pass per step.
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/pace_b_moe.py
-class PhaseMoE(nn.Module):
-    experts: ModuleList[K × MLP(hidden=128)]
-    smooth_phase_gate(beta, p_t, g_prev) -> g_t
-class FlowActionHeadPACE(nn.Module):  # replaces the Euler branch
-
-# Config:
-#   use_pace_b = True
-#   moe_num_experts = 4
-#   moe_expert_hidden_dim = 128
-#   moe_switch_kappa = 5.0
-#   moe_switch_mu = 2.0
-#   moe_top_k = 2                 # 0 = soft gate
+# phase_centric/cliff_estimators.py
+def compute_I_hat_3(
+    v_theta_ct: Tensor,       # velocity at c_t
+    v_theta_ct_prev: Tensor,  # velocity at c_{t-1}
+) -> Tensor                   # PENDING
 ```
-
-**Acceptance**: `sanity_pace_b.py` requires boundary gate L2
-$>0.3$ and interior L2 $<0.05$ (the gate only moves meaningfully
-at transitions).
-
-**Relation to prior work**: sparse experts from Switch Transformer
-(arXiv 2101.03961) combined with a smooth EMA gate (inspired by
-PhaseAE, arXiv 2203.03580); distinct from the token-level soft
-routing of Mixture-of-Heads (MoH, arXiv 2410.11842) — ours is
-sequence-level and $\beta$-driven.
 
 ---
 
-### 3.5 PACE-C — Phase-density curriculum
+### 3.5 Concordance $C_t$ (PENDING)
 
-**Motivation**: random batches that mix episodes of different
-boundary density make early-training gradients oscillate; samples
-need to be exposed in order of difficulty.
+**Definition**: rank-based fusion of the three estimators within
+a rolling window of size $W=50$:
 
-**Method**: partition by per-episode boundary count
-$n_b = \sum_t \mathbb{1}[\text{gripper\_flip}_t]$ into three
-stages:
+$$
+C_t = \frac{1}{3}\!\left[
+  \mathrm{rank}_W\!\left(\hat I^{(1)}(t)\right)
+  + \mathrm{rank}_W\!\left(\hat I^{(2)}(t)\right)
+  + \mathrm{rank}_W\!\left(\hat I^{(3)}(t)\right)
+\right]
+$$
 
-| Step | $n_b$ cap | Difficulty |
-| :-- | :-- | :-- |
-| $< 1{,}000$ | $1$ | single segment |
-| $[1{,}000,\ 3{,}000)$ | $3$ | medium |
-| $\ge 3{,}000$ | $\infty$ | full set |
+where $\mathrm{rank}_W(x)$ is the percentile rank of $x$ within
+the last $W$ values of that estimator's history. Rank-based fusion
+makes $C_t \in [0,1]$ regardless of scale differences between
+estimators, and a cliff is declared only when **all three agree**
+(all ranks are high simultaneously).
 
-Boundary counting is done by
-`compute_episode_boundaries(actions, gripper_dim=-1)`, which counts
-gripper-state flips.
+**Why rank fusion instead of averaging raw values?**
+$I^{(1)}$ (Bhattacharyya, range $[-1,0]$), $I^{(2)}$ (negative
+variance, range $(-\infty, 0]$), and $I^{(3)}$ (negative velocity
+jump, range $(-\infty, 0]$) have incompatible scales. Rank
+normalisation is scale-free and outlier-robust.
 
-**Implementation interface**
+**Blocked by**: `compute_I_hat_2` and `compute_I_hat_3` (§3.3,
+§3.4).
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/pace_c_curriculum.py
-@dataclass
-class PhaseDensityCurriculum:
-    stage_steps: Tuple[int,int,int] = (1000, 3000, 10000)
-    max_boundaries_stage1: int = 1
-    max_boundaries_stage2: int = 3
-    def sample_mask(self, global_step, episode_boundaries) -> BoolTensor
-def compute_episode_boundaries(actions, gripper_dim=-1) -> int
-
-# Config:
-#   use_pace_c = True
-#   curriculum_stage_steps = (1000, 3000, 10000)
-#   curriculum_max_boundaries_stage1 = 1
-#   curriculum_max_boundaries_stage2 = 3
+# phase_centric/cliff_estimators.py
+def compute_concordance_C(
+    i_hat_values: Sequence[Tensor],   # [I1, I2, I3]
+    window_size: int = 50,
+) -> Tensor                            # PENDING
 ```
 
-**Relation to prior work**: Bengio et al. Curriculum Learning
-(ICML 2009) difficulty staging + Matiisen et al. Teacher–Student
-(arXiv 1707.00183) automated difficulty; our distinguishing point
-is that the difficulty measure comes from a task-physics prior
-(gripper flip = sub-task transition) rather than loss.
+**Config**: `pcar_input_signal = "concordance"` (routes through
+concordance once implemented; falls back to `"beta"` in the
+meantime).
 
 ---
 
-### 3.6 PCAR — Phase-Change Aware Adaptive Replanning
+### 3.6 PCAR — Predictability Cliff Adaptive Replanning
 
 **Motivation**: open-loop chunk prediction drifts in long-horizon
-tasks, but replanning every step wastes compute (even at 1-NFE the
-flow forward is non-trivial) and loses temporal consistency. We
-want a statistically interpretable adaptive trigger.
+tasks; replanning every step wastes compute and loses temporal
+consistency. PCAR triggers replanning only when the cliff signal
+exceeds a budget-adaptive threshold.
 
-**Method**: maintain the rolling empirical distribution of $\beta$
-and pick the quantile corresponding to a budget
-$\epsilon \in (0,1)$:
+**Method**: budget-quantile trigger (§2.4, DKW guarantee):
 
 $$
-\tau^{\text{cp}}_n = \hat Q_n(1-\epsilon),
-\quad
-\text{replan}_t = \mathbb{1}[\beta_t > \tau^{\text{cp}}_n]
+\tau^{\text{cp}}_n = \hat Q_n(1 - \epsilon),
+\qquad
+\text{replan}_t = \mathbb{1}[s_t > \tau^{\text{cp}}_n]
 $$
 
-DKW guarantee (§2.4): the actual replan rate deviates from the
-budget by $O(1/\sqrt{n})$. During warm start ($n < 50$) we use the
-static $\tau=0.4$.
+where $s_t = C_t$ (or $\beta_t$ until concordance is
+implemented). Warm start: static $\tau = 0.4$ for $n < 50$.
 
-**Dual-head variant** (optional): a chunk that crosses a phase
-boundary is split into pre/post segments with independent decoders
-and loss weight $0.3$, so that a single head doesn't have to fit a
-bimodal distribution at the transition.
+**Bayesian variant** (`BayesianPCARTrigger`): Beta-mixture
+posterior $P(\text{changepoint} \mid s_{1:t})$ instead of the
+empirical quantile; calibrated in stage 3 (`03_finetune_replan.yaml`).
 
-**Implementation interface**
+**Implementation**
 
 ```python
-# lerobot_policy_phaseqflow/phase_centric/pcar_trigger.py
+# phase_centric/pcar_trigger.py
 class PCARTrigger:
     history: Deque[float]              # maxlen=1000
     warmup_min: int = 50
-    budget_eps: float = 0.1
-    def update_and_check(beta: float) -> bool
-class DualFlowHead(nn.Module):         # optional pre/post dual heads
+    budget_eps: float = 0.1           # ε
+    def update_and_check(signal: float) -> bool
 
-# Config:
-#   use_pcar = True
-#   pcar_trigger_budget_eps = 0.1
-#   pcar_change_threshold = 0.4        # warm-start fallback
-#   pcar_dual_head = False
-#   pcar_post_head_ratio = 0.5
-#   pcar_post_loss_weight = 0.3
+class DualFlowHead(nn.Module):        # optional; splits pre/post-boundary
+
+# phase_centric/b_pcar.py
+class BayesianPCARTrigger:
+    def update_and_check(signal: float) -> bool  # same interface
+
+# PhaseQFlowConfig:
+#   use_pcar                 = True
+#   pcar_input_signal        = "concordance"   # or "beta" / "variance" / "curvature"
+#   pcar_trigger_budget_eps  = 0.1
+#   pcar_change_threshold    = 0.4             # warm-start fallback
 ```
 
-**Acceptance**: `verify_pcar_budget.py` requires
-$|\text{diff}| < 0.005$ for every
-$\epsilon \in \{0.05, 0.1, 0.2, 0.3\}$ (synthetic $\beta$ sequence,
-$n=1000$).
+**Verification**: `verify_pcar_budget.py` requires
+$|\text{actual\_rate} - \epsilon| < 0.005$ for all
+$\epsilon \in \{0.05, 0.1, 0.2, 0.3\}$.
 
-**Relation to prior work**: BID (arXiv 2408.17355) test-time
-Best-of-N answers "which chunk to pick"; PCAR answers "when to
-recompute a chunk" — the two are orthogonal. Shares the
-compute-on-demand idea with adaptive computation time (Graves,
-arXiv 1603.08983), but the threshold comes from an empirical
-quantile rather than a learned gate.
+**Prior work**: BID (arXiv 2408.17355) answers "which chunk to
+execute"; PCAR answers "when to recompute". Adaptive Computation
+Time (Graves, arXiv 1603.08983) uses a learned gate; ours uses an
+empirical quantile with a DKW statistical guarantee.
 
 ---
 
-### 3.7 Summary of innovations
+### 3.7 Boundary-aware flow loss (PACE-A)
 
-| # | Name | Feature gate | Core formula | Main verification script |
-| :-- | :-- | :-- | :-- | :-- |
-| I1 | Chunk-level InfoNCE | `use_chunk_infonce` | $-\log\tfrac{\exp(s_{ii}/\tau)}{\sum_j \exp(s_{ij}/\tau)}$ | `verify_identifiability.py` |
-| I2 | Phase Posterior $\beta_t$ | `use_phase_boundary_posterior` | $1-\sum_k\sqrt{\hat p_t \hat p_{t-1}}$ | `verify_phase_posterior.py` |
-| I3 | PACE-A | `use_pace_a` | $(1+\lambda\beta)\|v-v^*\|^2 - \eta H(\beta)$ | `sanity_pace_a.py` |
-| I4 | PACE-B | `use_pace_b` | $g_t = \sigma(\kappa\beta-\mu)p_t + (1-\cdot)g_{t-1}$ | `sanity_pace_b.py` |
-| I5 | PACE-C | `use_pace_c` | stage-wise $n_b$ filter | (sampling assertion at training time) |
-| I6 | PCAR | `use_pcar` | $\tau^{\text{cp}}=\hat Q(1-\epsilon)$ | `verify_pcar_budget.py` |
+**Motivation**: flow-matching loss at boundary steps is measured
+to be $\approx 4\times$ higher than at interior steps (§6 of the
+paper). Uniform weighting lets the majority interior steps dominate
+the gradient.
 
-I1–I2 are "infrastructure" (the shared $\beta$ signal), I3–I5 act
-at **training** time, and I6 acts at **inference** time. This
-train/inference orthogonality lets every entry in the ablation
-matrix be measured independently.
+**Method**: weight each step by $w_t = 1 + \lambda\,\beta_t^{\text{micro}}$,
+adding a Bernoulli entropy regulariser to prevent $\beta_t$
+collapsing to 0:
+
+$$
+\mathcal{L}_{\text{boundary}}
+  = \mathbb{E}_{t,x_t,d}\!\big[
+      (1 + \lambda\,\beta_t)\,\|v_\theta(x_t,t,d\mid c)-v^*_t\|^2
+    \big]
+    - \eta\,\mathbb{E}_t\!\big[H(\beta_t)\big]
+$$
+
+$\lambda = 0.5$ (`boundary_reweight_lambda` in v2 configs),
+$\eta = 0.01$. For the variational-bound interpretation see §2.3.
+
+**Implementation**
+
+```python
+# phase_centric/boundary_aware_flow.py
+def compute_boundary_aware_flow_loss(
+    v_pred, v_target, beta_t,
+    lambda_weight=0.5, entropy_weight=0.01,
+) -> {"fm_loss", "entropy_reg", "total"}
+
+def boundary_aware_reweight(beta_t, lambda_weight) -> Tensor  # per-step weights
+
+# phase_centric/pace_a_loss.py   (legacy name; same semantics)
+def compute_pace_a_flow_loss(v_pred, v_target, beta_t, ...) -> dict
+
+# PhaseQFlowConfig:
+#   use_pace_a              = True
+#   use_boundary_reweight   = True
+#   boundary_reweight_lambda = 0.5
+#   pace_a_detach_beta      = True
+```
+
+**Verification**: `sanity_pace_a.py` requires boundary-step FM
+loss reduced by $\ge 20\%$ vs `no_weight` mode, and
+$\mathbb{E}[\beta] > 0.1$ (entropy regulariser is effective).
 
 ---
 
-## 4 Ablation Matrix Design
+### 3.8 Summary
+
+| Component | Feature gate | Status | Core formula |
+| :-- | :-- | :--: | :-- |
+| Phase InfoNCE | `use_chunk_infonce` | ✓ | $-\log\tfrac{\exp(s_{ii}/\tau)}{\sum_j\exp(s_{ij}/\tau)}$ |
+| $\hat I^{(1)}$ Bhattacharyya | `use_phase_boundary_posterior` | ✓ | $-\beta_t = -(1-\sum_k\sqrt{\hat p_t\hat p_{t-1}})$ |
+| $\hat I^{(2)}$ Variance | `pcar_input_signal="variance"` | ⏳ | $-\sigma_t^2 = -\tfrac{1}{N}\sum\|a^{(i)}-\bar a\|^2$ |
+| $\hat I^{(3)}$ Curvature | `pcar_input_signal="curvature"` | ⏳ | $-\|v_\theta(c_t)-v_\theta(c_{t-1})\|^2$ |
+| Concordance $C_t$ | `pcar_input_signal="concordance"` | ⏳ | $\tfrac{1}{3}\sum_k\mathrm{rank}_W(\hat I^{(k)})$ |
+| PCAR | `use_pcar` | ✓ | $\tau^{\text{cp}}=\hat Q_n(1-\epsilon)$ |
+| Boundary-aware loss | `use_boundary_reweight` | ✓ | $(1+\lambda\beta_t)\|v-v^*\|^2 - \eta H(\beta)$ |
+
+✓ implemented and tested · ⏳ specified, interface wired, implementation pending
+
+---
+
+## 4 Ablation Matrix (v2, seven configs)
 
 ### 4.1 Matrix structure
 
-Twelve configs × 3 seeds = 36 runs, covering the six-dimensional
-feature space from plain baseline to fully-on. Each config is
-uniquely determined by a combination of feature-gate switches:
+Seven configs × 3 seeds = 21 runs, each with a unique combination
+of cliff-detection signals and boundary reweighting. All configs
+live under `configs/ablation/v2/` and inherit the full base
+architecture from `configs/train/02_train_phase_and_flow.yaml`
+(only the `use_*` flags differ).
 
-| Config | InfoNCE (I1) | $\beta_t$ (I2) | PACE-A (I3) | PACE-B (I4) | PACE-C (I5) | PCAR (I6) | Scientific purpose |
-| :-- | :--: | :--: | :--: | :--: | :--: | :--: | :-- |
-| `baseline` | | | | | | | Control: plain BC-Chunked pipeline |
-| `ident` | ✓ | | | | | | Measures the standalone contribution of InfoNCE identifiability |
-| `a` | | ✓ | ✓ | | | | PACE-A alone (needs $\beta_t$ to back it) |
-| `b` | | ✓ | | ✓ | | | PACE-B alone |
-| `c` | | ✓ | | | ✓ | | PACE-C alone (curriculum doesn't depend on $\beta$, but I2 stays on for a consistent comparison) |
-| `ab` | | ✓ | ✓ | ✓ | | | A×B interaction (does weighting + MoE resonate?) |
-| `ac` | | ✓ | ✓ | | ✓ | | A×C interaction (weighting + curriculum) |
-| `bc` | | ✓ | | ✓ | ✓ | | B×C interaction (MoE + curriculum) |
-| `pace` | | ✓ | ✓ | ✓ | ✓ | | All training-time PACE, PCAR off |
-| `pcar_only` | | ✓ | | | | ✓ | Standalone contribution of inference-time PCAR |
-| `full` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Everything on (headline number in the paper) |
-| `pcar_noident` | | ✓ | ✓ | ✓ | ✓ | ✓ | Full minus I1, checks whether identifiability is necessary |
+| Config file | $\hat I^{(1)}$ | $\hat I^{(2)}$ | $\hat I^{(3)}$ | Concordance | Boundary reweight | Scientific purpose |
+| :-- | :--: | :--: | :--: | :--: | :--: | :-- |
+| `01_bc_chunked.yaml` | | | | | | Control: plain BC-Chunked, fixed-H replanning, no cliff detection |
+| `02_cliff_via_beta_only.yaml` | ✓ | | | | | Marginal gain of $\hat I^{(1)}$ alone (PCAR via $\beta_t$) |
+| `03_cliff_via_var_only.yaml` | | ✓ | | | | Marginal gain of $\hat I^{(2)}$ alone (PCAR via variance) |
+| `04_cliff_via_curvature_only.yaml` | | | ✓ | | | Marginal gain of $\hat I^{(3)}$ alone (PCAR via curvature) |
+| `05_cliff_concordance.yaml` | ✓ | ✓ | ✓ | ✓ | | Full concordance, no boundary reweight |
+| `06_oracle_cliff.yaml` | — | — | — | — | — | Oracle gripper-flip signal: upper bound |
+| `07_cliff_concordance_with_boundary_reweight.yaml` | ✓ | ✓ | ✓ | ✓ | ✓ | **Full PACE v2** (paper headline) |
 
-**Seed choice**: $\{42,\ 123,\ 2024\}$ — three widely spaced seeds
-without special meaning, to rule out seed cherry-picking.
+Configs 03, 04, 05, 07 are pending until `compute_I_hat_2` /
+`compute_I_hat_3` / `compute_concordance_C` are implemented (§3.3–3.5).
+In the meantime the ablation dry-run pipeline (`--dry_run`) uses
+synthetic data to verify that the configuration wiring and
+statistical aggregation are correct end-to-end.
 
-**Total budget**: GPU (RTX 5070) $\approx 20{,}000$ steps × 36
-runs $\approx 12$ days; CPU-sandbox placeholder proxy $3$ steps ×
-36 runs $\approx 1\text{–}2$ min (for pipeline integrity and
-artifact completeness checks).
+**Seed choice**: $\{42,\ 123,\ 2024\}$.
+
+**Total compute**: GPU (RTX 5070) $\approx 20{,}000$ steps × 21
+runs $\approx 7$ days. CPU dry-run: $\approx 1{-}2$ min.
 
 ### 4.2 Design principles
 
 #### (a) Ceteris paribus
 
-- Apart from the feature gates, every hyperparameter (lr, batch,
-  optimizer, EMA, data augmentation, four-stage curriculum) is
-  **identical** across the 12 configs.
-- This is enforced by the `MODE_PRESETS` dict in
-  `scripts/training/train_dummy_batch.py` — each config overrides
-  only the `use_*` flags and never touches numerical hyperparams.
+Apart from the feature gates, every hyperparameter (lr, batch,
+optimizer, EMA, data augmentation, three-stage curriculum) is
+identical across the seven configs. Each YAML overrides only the
+`use_*` and `pcar_input_signal` fields; numerical hyper-parameters
+are inherited from the base train config.
 
-#### (b) Factorised rather than fully random
+#### (b) Additive ablation ladder
 
-- Singles (`ident` / `a` / `b` / `c` / `pcar_only`): measure the
-  **marginal contribution**
-  $\Delta_i = \text{SR}(I_i) - \text{SR}(\text{baseline})$.
-- Pairwise interactions (`ab` / `ac` / `bc`): measure the
-  **interaction term**
-  $\Delta_{ij} = \text{SR}(I_i I_j) - \Delta_i - \Delta_j - \text{SR}(\text{baseline})$;
-  $>0$ is synergy, $<0$ is conflict.
-- Pairing `full` with "remove one" (`pcar_noident`) directly
-  measures $\Delta_{\text{InfoNCE}}$ in the presence of the other
-  five — a check for whether identifiability is "only useful in
-  simple configurations."
+The seven configs form an additive ladder:
 
-#### (c) Train/inference stratification
+```
+01 (no cliff)
+  → 02 (I^(1) only)
+  → 03 (I^(2) only)          each single-estimator row measures
+  → 04 (I^(3) only)          the marginal gain of that estimator alone
+  → 05 (concordance, no reweight)
+  → 07 (concordance + reweight)  = full PACE v2 headline
+  → 06 (oracle)              upper bound; not a valid deployment config
+```
 
-- I1–I5 fire at **training** time → configs `ident`, `a`, `b`,
-  `c`, `ab`, `ac`, `bc`, `pace`.
-- I6 (PCAR) fires at **inference** time → `pcar_only` takes its
-  own slot, and `full` / `pcar_noident` measure combined effects.
+Comparing 05 → 07 isolates the contribution of boundary-aware
+flow loss. Comparing 02/03/04 → 05 measures the gain from
+multi-estimator fusion vs. any single estimator.
+
+#### (c) Train / inference separation
+
+All cliff estimators and concordance fire at **inference** time
+(they observe the current state without gradient). The boundary
+reweight fires at **training** time only. PCAR fires at both
+(training: budget calibration in stage 3; inference: actual
+replanning). This separation means inference configs can be
+swapped without retraining.
 
 ### 4.3 Statistical aggregation
 
-`scripts/paper/aggregate_ablation.py` aggregates per config ×
-benchmark (LIBERO-10 Long-Horizon / LIBERO-Spatial):
+`scripts/aggregate_ablation.py` aggregates per config × benchmark
+(LIBERO-Long / LIBERO-Spatial) using rliable-style statistics:
 
 | Field | Definition |
 | :-- | :-- |
-| $\bar{\text{SR}}$ | Mean success rate across 3 seeds |
-| $\pm \text{CI}_{95}$ | Student-$t$ 95% confidence interval (dof $n-1=2$) |
-| $p$-value | Two-tailed paired $t$-test vs baseline |
-| $\Delta$ | $\bar{\text{SR}}_{\text{cfg}} - \bar{\text{SR}}_{\text{baseline}}$ |
-| `placeholder_stats` | `true` for the CPU-sandbox dummy-batch; overwritten to `false` by a real GPU run |
+| IQM | Interquartile mean across seeds (rliable's recommended point estimate) |
+| $\text{CI}_{95}$ | Stratified bootstrap 95% CI (2000 resamples) |
+| Wilcoxon $p$ | Paired signed-rank test vs config 01 baseline |
+| Cohen's $d$ | Effect size vs baseline |
+| `placeholder` | `true` for synthetic dry-run data; `false` after GPU eval |
 
-Artifacts: `artifacts/ablation/stats.json` and
-`artifacts/paper_stats.md` (a Markdown table, paper-ready).
+```bash
+# Dry run (verifies pipeline; numbers are synthetic):
+python scripts/aggregate_ablation.py --dry_run
 
-### 4.4 Falsification design: the LIBERO-Spatial specificity test
+# Real run (after GPU training, outputs in outputs/ablation_v2/):
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
+```
 
-**Logic**: if the Phase-Centric innovations were a generic
-regulariser, they would also improve tasks that have **no obvious
-phase structure**; if the gains really are "phase-driven," then
-spatial generalisation (LIBERO-Spatial) should benefit
-significantly less than long-horizon (LIBERO-10).
+Artifacts: `paper_figures/ablation_v2/ablation_table_v2.tex` and
+`ablation_stats.csv`.
 
-**Operationalisation**: roll out the same checkpoint on both
-benchmarks:
+### 4.4 Falsification design: specificity test
+
+If the cliff-detection gains were a generic regulariser, LIBERO-Spatial
+(no consistent phase structure) should benefit as much as
+LIBERO-Long. The specificity metric is:
 
 $$
 \Delta_{\text{specificity}}
-  = \big[\text{SR}_{\text{long}}(\text{full}) - \text{SR}_{\text{long}}(\text{baseline})\big]
-    - \big[\text{SR}_{\text{spatial}}(\text{full}) - \text{SR}_{\text{spatial}}(\text{baseline})\big]
+  = \big[\text{SR}_{\text{long}}(07) - \text{SR}_{\text{long}}(01)\big]
+    - \big[\text{SR}_{\text{spatial}}(07) - \text{SR}_{\text{spatial}}(01)\big]
 $$
 
-- $\Delta_{\text{specificity}} > 0$ with $p < 0.05$: supports the
-  "phase-driven" hypothesis.
-- $\Delta_{\text{specificity}} \approx 0$: the gain is a generic
-  regulariser and the hypothesis is falsified.
+$\Delta_{\text{specificity}} > 0$ with $p < 0.05$ supports
+the cliff-driven hypothesis; $\approx 0$ falsifies it.
 
-**Expected value** (real GPU run): $\Delta_{\text{specificity}}$
-around $+8$ to $+10$ pp (PACE-C on Spatial is projected to give
-$\Delta_c \approx -1.8$ pp, i.e. a negative contribution, which is
-exactly the counter-check that I5 relies on phase structure).
+### 4.5 SOTA reference points
 
-### 4.5 Comparison with SOTA (reference points, not a contribution of this repo)
+Numbers reported in published papers on LIBERO-Long; included for
+Related Work context only. These are **not reproduced by this
+repo** — the checkpoint and evaluation protocol differences
+between papers make direct comparison unreliable without a shared
+evaluation harness.
 
-Publicly reported LIBERO-10 numbers:
-
-| Method | Reported SR | Source |
+| Method | Reported LIBERO-Long SR | Source |
 | :-- | :--: | :-- |
 | OpenVLA-OFT | 54.5% | arXiv 2502.19645 |
 | $\pi_0$ | 60.0% | arXiv 2410.24164 |
 | MoH | 57.8% | arXiv 2410.11842 |
 
-The three rows above are **reference points** for the paper's
-Related Work only. The true LIBERO-10 SR of the repo's `full`
-config has to be read from `artifacts/ablation/stats.json` after a
-completed RTX 5070 run of `run_ablation.sh` +
-`run_eval_libero.sh`; **CPU placeholder numbers must not stand in
-for it** (that field carries `placeholder_stats=true`).
+The PACE v2 `full` config SR must come from
+`paper_figures/ablation_v2/ablation_stats.csv` produced by a
+completed GPU run; synthetic dry-run numbers (`placeholder=true`)
+must not be cited as results.
 
 ### 4.6 Reproduction commands
 
 ```bash
-# Full matrix (real GPU run)
-TOTAL_STEPS=20000 SEEDS="42 123 2024" DEVICE=cuda \
-    bash scripts/training/run_ablation.sh
+# Pipeline integrity check (CPU, ~2 min, no checkpoint needed):
+python scripts/aggregate_ablation.py --dry_run
+bash scripts/smoke/smoke_phase_centric.sh
 
-# Pipeline sanity (CPU, 1–2 min)
-TOTAL_STEPS=3 SEEDS="42 123" DEVICE=cpu SKIP_EVAL=1 \
-    bash scripts/training/run_ablation.sh
+# Stage 2 training for one config (GPU required):
+python scripts/training/train_dummy_batch.py \
+    --config configs/ablation/v2/07_cliff_concordance_with_boundary_reweight.yaml \
+    --total_steps 20000 --seed 42
+
+# Aggregate results after all 21 runs:
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
 ```
-
-Matrix runs use `eval_done.marker` files for resumable
-checkpointing; aggregation, figures, and the LaTeX table are
-regenerated automatically at the tail of the script.
 
 ---
 
 ## 5 Verification System
 
-The verification system sidesteps large-scale SR evaluation: the
-core mathematical assertions of every Phase-Centric innovation can
-be falsified inside a **CPU sandbox**. All scripts live under
-`scripts/verification/`, and each one targets three properties:
-fast ($\le 2$ min), falsifiable (PASS / FAIL verdict), and
-statistically interpretable (carrying a $p$-value or confidence
-interval).
+Every mathematical claim in §2–3 can be falsified in a CPU
+sandbox without a dataset or GPU. All scripts live under
+`scripts/verification/` and `scripts/smoke/`. Each returns a
+clear PASS / FAIL verdict and takes under 2 minutes.
 
 ### 5.1 Script–assertion–acceptance table
 
-| Script | Target innovation | Statistical assertion | Expected output |
-| :-- | :-- | :-- | :-- |
-| `verify_identifiability.py` | I1 Chunk-NCE | Hungarian-aligned permuted-agreement across 3 seeds $\ge 0.7$ | verdict: PASS / WARN_DEGENERATE |
-| `verify_phase_posterior.py` | I2 $\beta_t$ | $\beta_t$ peaks align with ground-truth boundaries on 50 demos (peak-F1 $\ge 0.5$) | verdict: PASS |
-| `sanity_pace_a.py` | I3 PACE-A | Boundary-step FM loss reduced by $\ge 20\%$ vs `no_weight`, with $\mathbb{E}[\beta]>0.1$ | `passes_20pct_boundary_reduction` |
-| `sanity_pace_b.py` | I4 PACE-B | Gate L2 $>0.3$ at boundary, $<0.05$ inside a phase | `passes_gate_magnitude_contrast` |
-| `verify_pcar_budget.py` | I6 PCAR | $\forall \epsilon \in \{0.05, 0.1, 0.2, 0.3\}$: $\|\text{actual\_rate}-\epsilon\|<0.005$ | verdict: PASS |
+| Script | What it checks | Acceptance criterion |
+| :-- | :-- | :-- |
+| `verify_identifiability.py` | Phase InfoNCE codebook alignment across 3 seeds | Hungarian permuted-agreement $\ge 0.7$ |
+| `verify_phase_posterior.py` | $\hat I^{(1)}$ peaks align with ground-truth boundaries (50 demos) | peak-F1 $\ge 0.5$ at $\pm 3$-frame tolerance |
+| `sanity_pace_a.py` | Boundary-aware flow loss reduces boundary-step FM loss | reduction $\ge 20\%$ vs `no_weight`; $\mathbb{E}[\beta] > 0.1$ |
+| `verify_pcar_budget.py` | PCAR actual replan rate tracks budget $\epsilon$ (DKW bound) | $\|\text{rate} - \epsilon\| < 0.005$ for all $\epsilon \in \{0.05, 0.1, 0.2, 0.3\}$ |
+| `sanity_pace_b.py` | *(optional)* PACE-B MoE gate switches meaningfully at boundaries | gate L2 $> 0.3$ boundary, $< 0.05$ interior |
 
-(I5 PACE-C verification is folded into the curriculum-mask
-assertion inside `train_dummy_batch.py`; its "boundary-count
-filter" is deterministic logic and doesn't need a statistical
-check.)
+`sanity_pace_b.py` tests the optional PACE-B MoE gate
+(`use_pace_b=True`), which is disabled in all shipped configs.
+It is included to verify the gating mechanism remains correct
+even when not in the main ablation path.
 
 ### 5.2 Identifiability verification: Hungarian alignment
 
-**Problem**: phase codebooks trained on the same data across three
-seeds are unordered — seed 42's "code 7" might correspond to seed
-123's "code 12." Comparing argmax directly is unfair.
-
-**Solution**: for each pair (seed $i$, seed $j$), build a
-$K \times K$ confusion matrix $C_{ij}$ ($C_{ij}[a,b]$ = number of
-samples that seed $i$ assigned to $a$ and seed $j$ assigned to
-$b$), run the **Kuhn–Munkres (Hungarian) algorithm**
-(`scipy.optimize.linear_sum_assignment` on $-C$ gives the maximum
-matching) to find the best permutation $\pi_{ij}$, then compute
-the aligned agreement rate:
+Phase codebooks trained across three seeds are unordered — seed
+42's "code 3" may correspond to seed 123's "code 11." For each
+pair $(i, j)$, build a $K \times K$ confusion matrix $C_{ij}$
+and run the Kuhn–Munkres algorithm
+(`scipy.optimize.linear_sum_assignment` on $-C$) to find the
+best permutation $\pi_{ij}$:
 
 $$
 \text{PA}(i, j)
   = \frac{1}{N}\sum_{n=1}^{N}
-    \mathbb{1}\!\left[\hat z^{(i)}_n = \pi_{ij}\big(\hat z^{(j)}_n\big)\right]
+    \mathbb{1}\!\left[\hat z^{(i)}_n = \pi_{ij}\!\left(\hat z^{(j)}_n\right)\right]
 $$
 
-The final permuted-agreement is
-$\text{mean}_{i<j}\text{PA}(i,j)$.
+Final score: $\text{mean}_{i<j}\,\text{PA}(i,j)$. Threshold $0.7$
+is $175\times$ the random-assignment baseline ($1/K \approx 0.004$
+for $K=240$); a trivially collapsed codebook also fails because
+the InfoNCE loss is simultaneously very high.
 
-**Why $0.7$**: under random assignment
-$\mathbb{E}[\text{PA}] = 1/K$ ($\approx 0.004$ for $K=240$); a
-collapse to a single code gives PA $=1$, but the InfoNCE loss
-explodes at the same time (the "loss $<$ bound" side-check
-prevents that trivial single-code pass). $0.7$ is a robust lower
-bound for "three independent random processes reaching agreement";
-typical values after 10k–20k GPU steps are $>0.8$.
+### 5.3 Posterior verification: peak alignment
 
-### 5.3 Posterior verification: peak alignment and $\beta$-density threshold
+`verify_phase_posterior.py` generates ground-truth boundary
+timestamps over 50 synthetic demos, finds local peaks of $\beta_t$
+(strictly greater than both neighbours and $> \theta_{\text{peak}}$),
+and matches against ground truth within $\pm 3$ frames.
 
-**Operating logic**: `verify_phase_posterior.py` generates
-ground-truth phase-boundary timestamps $t^{\text{gt}}_k$ over 50
-synthetic demos, then finds local peaks of $\beta_t$
-($\beta_t > \max(\beta_{t-1}, \beta_{t+1})$ and
-$\beta_t > \theta_{\text{peak}}$) and matches them against the
-ground truth with a $\pm 3$-frame tolerance window to compute
-peak-F1.
+Default $\theta_{\text{peak}} = 0.15$ (conservative — more false
+positives, harder to achieve F1). After a GPU training run, pass
+`--peak-threshold 0.5` for the production-ready threshold.
 
-**Threshold choice**: $\theta_{\text{peak}}$ has two settings:
+### 5.4 Boundary-aware flow loss sanity
 
-| Threshold | Meaning | Applicable when |
-| :-- | :-- | :-- |
-| $0.15$ | "any visible distribution drift" | early training, when $\hat p_t$ is still not sharp |
-| $0.50$ | "significant distribution change (below half BC)" | late training, around the downstream default $\tau^{\text{cp}}$ used by PCAR |
-
-The repo's verification uses $0.15$ (the lower threshold is
-stricter — more false positives, harder to pass F1); after a long
-GPU run, switch to $0.50$ by passing `--peak-threshold 0.5` to
-`verify_phase_posterior.py`.
-
-**Why not BCE/CE**: the ground-truth boundaries are sparse
-discrete events, and BCE has near-zero gradient at
-$t \neq t^{\text{gt}}$, so it can't measure alignment quality.
-
-### 5.4 PACE-A counter-example design
-
-**Core design**: `sanity_pace_a.py` synthesises three groups:
-
-1. **boundary-heavy**: $\beta_t$ constantly $1$ (pure
-   transitions).
-2. **interior-flat**: $\beta_t$ constantly $0$ (no transitions).
-3. **mixed**: $20\%$ of steps at $1$, the rest at $0$ (close to a
-   real scene).
-
-Train $v_\theta$ to convergence on each group (100 steps is enough
-for a small synthetic model) and compare the **boundary-step** FM
-loss for `full` vs `no_weight`:
+`sanity_pace_a.py` synthesises three groups (boundary-heavy,
+interior-flat, mixed) and trains a small velocity network for
+100 steps with `full` vs `no_weight` modes. The acceptance check
+measures:
 
 $$
 \text{reduction}
-  = \frac{\text{FM}_{\text{no\_weight}}(\text{boundary}) - \text{FM}_{\text{full}}(\text{boundary})}
-         {\text{FM}_{\text{no\_weight}}(\text{boundary})}
+  = \frac{\text{FM}_{\text{no\_weight}} - \text{FM}_{\text{full}}}
+         {\text{FM}_{\text{no\_weight}}}
+  \ge 20\%
 $$
 
-Require reduction $\ge 20\%$. That number matches the theoretical
-ceiling for $\lambda=2.0$: the weight amplifies boundary-step loss
-by up to $3\times$, which raises the equivalent step count from
-$1$ to $3$ and speeds up boundary fitting by $\approx 3\times$,
-translating into a roughly $25\%$ drop in final FM over 100
-training steps. $20\%$ is the conservative threshold.
+The $20\%$ threshold is conservative for $\lambda = 0.5$
+(`boundary_reweight_lambda` in v2 configs): $w_{\text{max}} =
+1 + 0.5 = 1.5$, which accelerates boundary-step fitting by
+$50\%$ in the best case; a $20\%$ net reduction over 100 steps
+is comfortably reachable.
 
-**`no_entropy` mode**: verifies the entropy regulariser is
-necessary — without it, $\beta$ can drift toward $0.5$ (maximally
-uncertain), weakening the weighting signal. The script records
-`mean_beta` and requires $>0.1$ to rule out $\beta$ collapsing.
+### 5.5 PCAR budget-quantile verification
 
-### 5.5 PACE-B gate-magnitude contrast
-
-`sanity_pace_b.py` computes the gate update
-$\|g_t - g_{t-1}\|_2$ separately on boundary and interior samples.
-Theoretically $\alpha_t = \sigma(\kappa\beta-\mu)$ gives
-$\alpha \approx 0.95$ at $\beta=1$ (big update) and
-$\alpha \approx 0.12$ at $\beta=0$ (tiny update). The
-$>0.3$ boundary / $<0.05$ interior thresholds confirm the gate
-only switches meaningfully at transitions — otherwise the MoE
-degenerates to every sample taking the same route.
-
-### 5.6 PCAR budget-quantile verification
-
-`verify_pcar_budget.py` constructs a synthetic $\beta$ sequence:
+`verify_pcar_budget.py` constructs a synthetic signal sequence:
 
 $$
-\beta_t = 0.1 \cdot B(2, 8) + 0.9 \cdot \sum_k \mathcal{N}(\mu_k, 0.02^2)\cdot \mathbb{1}[t \in W_k]
+s_t = 0.1 \cdot B(2, 8) + 0.9 \cdot \sum_k \mathcal{N}(\mu_k, 0.02^2) \cdot \mathbb{1}[t \in W_k]
 $$
 
-where $B(2,8)$ is the low-level baseline noise (simulating
-interior steps) and the $\mathcal{N}$ pulses are the transition
-events ($W_k$ are the boundary windows). On this distribution, the
-theoretical upper bound on $|\text{diff}|$ required by DKW
-convergence is $\approx 0.043$ ($n=1000$, $\delta=0.05$; see §2.4).
-The script uses a stricter $0.005$ acceptance threshold — because
-the distribution is synthetic and known, the quantile estimate
-deviates less than the DKW worst case, so the tighter threshold is
-reachable.
+where $B(2,8)$ is interior-step baseline noise and the Gaussian
+pulses are transition events. The DKW worst-case bound for this
+distribution is $\approx 0.043$ ($n=1000$, $\delta=0.05$); the
+repo uses the tighter $0.005$ threshold because the synthetic
+distribution is known and the quantile deviates well below the
+DKW worst case. All four $\epsilon$ values must pass.
 
-All four $\epsilon$ values must pass to return PASS, preventing a
-single-point accuracy that is skewed overall.
+### 5.6 Coverage
 
-### 5.7 Coverage and blind spots of the acceptance suite
+| Assertion | CPU sandbox | Needs GPU |
+| :-- | :--: | :--: |
+| InfoNCE identifiability math | ✓ | |
+| Bhattacharyya properties ($\beta \in [0,1]$, TV sandwich) | ✓ | |
+| Boundary-aware FM loss reduction | ✓ | |
+| PCAR DKW budget tracking | ✓ | |
+| End-to-end SR gains ($\Delta$, specificity) | | ✓ |
+| Latency / NFE cost | | ✓ |
+| Cross-dataset generalisation | | ✓ |
 
-| Assertion type | Covered by verification scripts | Still needs a real GPU run |
-| :-- | :-- | :-- |
-| Mathematical properties (identifiability, BC properties, DKW) | ✓ | — |
-| Per-module engineering correctness (gate magnitude, weighted loss decrease) | ✓ | — |
-| Combined gains ($\Delta$, $\Delta_{\text{specificity}}$) | ✗ | ✓ `run_eval_libero.sh` |
-| Latency / throughput | ✗ | ✓ `benchmark_latency.py` |
-| Cross-dataset robustness | ✗ | ✓ multi-task eval |
-
-### 5.8 One-liner self-check
+### 5.7 One-liner self-check
 
 ```bash
-# 5 verification scripts + 77 unit tests + 7-mode E2E smoke, all CPU-friendly
 pytest tests/ -v
-bash   scripts/smoke/smoke_phase_centric.sh
+bash scripts/smoke/smoke_phase_centric.sh
 python scripts/verification/verify_identifiability.py
 python scripts/verification/verify_phase_posterior.py
-python scripts/verification/verify_pcar_budget.py
 python scripts/verification/sanity_pace_a.py
-python scripts/verification/sanity_pace_b.py
+python scripts/verification/verify_pcar_budget.py
 ```
 
 Expected: `204 passed`; the 7-mode smoke all returns `[OK]`; the 5
