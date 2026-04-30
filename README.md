@@ -26,9 +26,9 @@
 | PCAR budget-quantile DKW bound | **verified** (CPU) | `verify_pcar_budget.py` $\|\text{rate}-\epsilon\|<0.005$ |
 | Boundary-aware flow loss reduction | **verified** (CPU) | `sanity_pace_a.py` $\ge 20\%$ FM drop |
 | Unit + smoke tests | **verified** (CPU) | `pytest tests/` → 204 passed |
-| $\hat I^{(2)}$ Action variance | **pending** | `compute_I_hat_2` raises `NotImplementedError`; multi-sample anchor design open |
-| $\hat I^{(3)}$ Velocity curvature | **pending** | `compute_I_hat_3` raises `NotImplementedError`; anchor strategy open |
-| Concordance $C_t$ rank fusion | **pending** | blocked on $\hat I^{(2)}$ and $\hat I^{(3)}$ |
+| $\hat I^{(2)}$ Action variance | **pending** | `compute_I_hat_2` raises `NotImplementedError`; Ablation 03 **disabled** (placeholder only) |
+| $\hat I^{(3)}$ Velocity curvature | **pending** | `compute_I_hat_3` raises `NotImplementedError`; Ablation 04 **disabled** (placeholder only) |
+| Concordance $C_t$ rank fusion | **pending** | blocked on I^(2) and I^(3); Ablation 05 shows **partial** result (I^(1) only) |
 | LIBERO-Long / Spatial SR (Tables 1, 2) | **placeholder** | requires GPU + LIBERO dataset + trained checkpoint |
 | Phenomenon §6.1–6.5 numbers | **placeholder** | requires LIBERO rollouts; current numbers from `--dry_run` |
 | Inference cost (params, NFE, latency) | **placeholder** | parameter count and NFE are correct per architecture; latency requires real GPU benchmark |
@@ -100,18 +100,25 @@ IQM ± 95% bootstrap CI (rliable-style).
 > measurements. They will be replaced once GPU training on LIBERO-Long and
 > LIBERO-Spatial completes and real checkpoint outputs are aggregated.
 
+> **Implementation gap (v2.0)**: Configs 03, 04, and 05 are **disabled** in the
+> current release. `compute_I_hat_2` (action variance) and `compute_I_hat_3`
+> (velocity curvature) raise `NotImplementedError`. Config 05 (concordance)
+> falls back to `beta_t` alone, making it effectively identical to config 02.
+> Only configs **01, 02, 06, 07** produce scientifically distinct results.
+> Configs 03/04/05 will be re-enabled in v2.1.
+
 | Config | Description | LIBERO-Long IQM (†placeholder) | LIBERO-Spatial IQM (†placeholder) |
 |--------|-------------|:------------------------------:|:----------------------------------:|
 | 01 | BC-Chunked (baseline) | 0.520 | 0.634 |
 | 02 | Cliff via β̂_t only (I^(1)) | 0.593 | 0.690 |
-| 03 | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
-| 04 | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
-| 05 | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
+| 03† | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
+| 04† | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
+| 05† | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
 | 06 | Oracle cliff (upper bound) | 0.746 | 0.781 |
 | **07** | **PACE v2: C_t + boundary reweight** | **0.692** | **0.727** |
 
-† Configs 03–05, 07 are also pending implementation of `compute_I_hat_2`,
-`compute_I_hat_3`, and `compute_concordance_C` (currently `NotImplementedError`).
+† Results marked with † are **placeholder values** (configs disabled due to
+  `NotImplementedError`). See Implementation Status table for details.
 
 ```bash
 # Verify pipeline (synthetic data, no checkpoint):

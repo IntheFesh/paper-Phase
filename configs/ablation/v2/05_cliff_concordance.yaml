@@ -1,3 +1,17 @@
+# ============================================================
+# STATUS: PARTIAL IMPLEMENTATION (dry_run placeholder)
+#
+# Concordance C_t requires all three estimators (I^1, I^2, I^3).
+# I^(2) and I^(3) are NotImplementedError → C_t falls back to
+# beta_t alone, making this config nearly identical to 02_cliff_via_beta_only.
+#
+# The pcar_input_signal="concordance" path in PCARTrigger currently
+# receives beta_t when concordance is unavailable.
+#
+# DO NOT cite numbers from this config as "full concordance" results.
+# Target: re-enable in v2.1 after all three estimators are implemented.
+# ============================================================
+
 # Ablation 5: Full concordance cliff detection (complete method, no boundary reweight).
 #
 # All three cliff estimators (I^(1), I^(2), I^(3)) are computed and fused
@@ -32,3 +46,5 @@ phaseqflow:
 
   pcar_change_threshold: 0.4
   pcar_trigger_budget_eps: 0.1
+
+  _status: "partial_i_hat_1_only"

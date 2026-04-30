@@ -38,6 +38,16 @@ Implementation status
 * :func:`compute_I_hat_3` — PENDING: see ``MIGRATION_NOTES.md`` §2.
 * :func:`compute_concordance_C` — PENDING: blocked on I_hat_2 and I_hat_3.
 
+Implementation roadmap (v2.0):
+
+* ``compute_I_hat_1``: IMPLEMENTED — used in Ablation 02, 07 and §6.5.
+* ``compute_I_hat_2``: PENDING — Ablation 03 blocked; target v2.1.
+* ``compute_I_hat_3``: PENDING — Ablation 04 blocked; target v2.1.
+* ``compute_concordance_C``: PENDING — Ablation 05 blocked; target v2.1.
+
+Ablation configs 03/04/05 currently produce placeholder results.
+Do NOT interpret their eval_results.json as real measurements.
+
 Internal names (Round-4 vintage) are kept as implementation details inside
 ``phase_posterior.py`` and ``modeling_phaseqflow.py``; only the cliff-namespace
 names defined here are the public-facing interface.
@@ -89,6 +99,11 @@ def compute_I_hat_2(
     Requires ``N ≥ 2`` action samples at each step; computation is blocked
     pending the decisions in ``MIGRATION_NOTES.md`` §1.
 
+    Status
+    ------
+    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
+    implementation.
+
     Raises
     ------
     NotImplementedError
@@ -114,6 +129,11 @@ def compute_I_hat_3(
     Requires the flow-matching velocity field evaluated at a fixed anchor
     ``(x_τ, τ)`` under two consecutive condition vectors ``c_t`` and
     ``c_{t-1}``.  Blocked pending the decisions in ``MIGRATION_NOTES.md`` §2.
+
+    Status
+    ------
+    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
+    implementation.
 
     Raises
     ------
@@ -142,6 +162,11 @@ def compute_concordance_C(
 
     Blocked until :func:`compute_I_hat_2` and :func:`compute_I_hat_3` are
     implemented; see ``MIGRATION_NOTES.md``.
+
+    Status
+    ------
+    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
+    implementation.
 
     Raises
     ------
