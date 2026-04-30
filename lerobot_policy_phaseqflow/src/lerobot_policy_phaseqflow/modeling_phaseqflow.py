@@ -1003,6 +1003,36 @@ class ShortcutFlowActionHead(nn.Module):
         x_1 = x_0 + 1.0 * self._velocity(x_0, t0, d1, cond)
         return {"action_pred": x_1}
 
+    def compute_cond(
+        self,
+        fused_obs: torch.Tensor,
+        phase_embed: torch.Tensor,
+        skill_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return conditioning vector c = conditioner([fused_obs, phase_embed, skill_latent]).
+
+        Used by VelocityCurvatureEstimator to obtain c_t and cache c_{t-1}.
+        """
+        return self.conditioner(torch.cat([fused_obs, phase_embed, skill_latent], dim=-1))
+
+    def velocity(
+        self,
+        x_tau: torch.Tensor,
+        tau: float,
+        cond: torch.Tensor,
+        d: float = 1.0,
+    ) -> torch.Tensor:
+        """Public interface to the velocity field v_θ(x_tau, tau, cond) at a fixed anchor.
+
+        Used by VelocityCurvatureEstimator for the I^(3) cliff estimator.
+        x_tau: (B, Ta, Da); tau: scalar in [0,1]; cond: (B, H)
+        """
+        B = cond.shape[0]
+        device = cond.device
+        t = torch.full((B, 1), tau, device=device, dtype=cond.dtype)
+        d_t = torch.full((B, 1), d, device=device, dtype=cond.dtype)
+        return self._velocity(x_tau, t, d_t, cond)
+
 
 # ============================================================
 # DEPRECATED for PACE v2 main path.

@@ -24,59 +24,71 @@ Confirmed against actual repo structure (last verified: 2026-04-30):
 
 ## Pending Human Decisions
 
-### [PHD-1] I_hat_2 — Action-Variance Cliff Estimator
+### [PHD-1] I_hat_2 — Action-Variance Cliff Estimator  ✅ RESOLVED
 
-**Formula (locked):**
-$\hat I^{(2)}(t) \propto -\sigma_t^2 = -\frac{1}{N}\sum_{i=1}^{N}\|a_t^{(i)} - \bar a_t\|^2$
-
-**Blocking question:** How should N action samples be drawn?
-
-- **Option A** — BID path (N=5 candidates in `select_action`): available only at
-  inference, not training; candidates share one condition vector so variance is
-  aleatoric only.
-- **Option B** — Multi-noise-seed call inside `forward`: N extra flow forward
-  passes; 5× compute overhead; need to decide training vs. inference vs. both.
-- **Option C** — Temporal-ensembling buffer variance across time steps.
-
-**Decision needed:** Which option is the intended semantic?
-
-**Blocked:** `cliff_detection/policy_variance.py`, `concordance.py`.
+**Decision:** Option B — N independent forward passes inside `PolicyVarianceEstimator.estimate()`.
+Each call to `flow_head.forward(training=False)` samples fresh Gaussian noise
+internally, yielding N distinct action predictions.  Default N=8.
+**Implemented:** `cliff_detection/policy_variance.py` — `PolicyVarianceEstimator`.
 
 ---
 
-### [PHD-2] I_hat_3 — Velocity-Difference Cliff Estimator
+### [PHD-2] I_hat_3 — Velocity-Difference Cliff Estimator  ✅ RESOLVED
 
-**Formula (locked):**
-$\hat I^{(3)}(t) \propto -\|v_\theta(x_\tau, \tau, c_t) - v_\theta(x_\tau, \tau, c_{t-1})\|_2^2$
+- **PHD-2a** — Anchor: episode-fixed noise at τ=0.5 (midpoint), d=1.0.
+  Drawn once per `VelocityCurvatureEstimator.update()` call; re-drawn when B changes.
+- **PHD-2b** — `c_{t-1}` stored as `_prev_cond` tensor inside `VelocityCurvatureEstimator`.
+- **PHD-2c** — Added public `velocity(x_tau, tau, cond, d)` and `compute_cond(fused_obs,
+  phase_embed, skill_latent)` to `ShortcutFlowActionHead`.  Private `_velocity` unchanged.
+  `FlowActionHeadPACE` does not expose these methods (incompatible — uses PhaseMoE).
 
-Three sub-decisions:
-
-- **PHD-2a** — Anchor point `(x_τ, τ, d)`: zero vector / episode-fixed noise /
-  previous action chunk? τ=0, 0.5, or 1?
-- **PHD-2b** — Storage of `c_{t-1}`: buffer inside `ShortcutFlowActionHead` or
-  passed in from `select_action` loop?
-- **PHD-2c** — Velocity exposure: rename `_velocity` → `velocity` or add public
-  `eval_velocity(x, t, d, cond)` wrapper?
-
-**Blocked:** `cliff_detection/velocity_curvature.py`, `concordance.py`.
+**Implemented:** `cliff_detection/velocity_curvature.py` — `VelocityCurvatureEstimator`.
 
 ---
 
-### [PHD-3] Concordance C_t — Rank-Based Fusion
+### [PHD-3] Concordance C_t — Rank-Based Fusion  ✅ RESOLVED
 
-**Formula (locked):**
-$C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}) + \mathrm{rank}_W(\hat I^{(2)}) + \mathrm{rank}_W(\hat I^{(3)})]$
-
-**Blocked on:** PHD-1 and PHD-2.
-**Sub-question:** Window size W? (PCAR uses 1000; suggest W=50 matching warmup_min.)
-
-**Blocked:** `cliff_detection/concordance.py`.
+**Decision:** W=50 (default), mid-rank convention for ties
+(`rank = 1 - (below + 0.5*equal) / W`), warmup_steps=W.
+**Implemented:** `cliff_detection/concordance.py` — `ConcordanceDetector`.
 
 ---
 
 ## Phase Completion Log
 
-### Phase B Completed 2026-04-30
+### Phase B (full) Completed 2026-04-30
+
+**§2.1  PosteriorBhattacharyyaEstimator** (`cliff_detection/posterior_bhattacharyya.py`)
+- Thin delegator over `PhasePosteriorEstimator`; `step(logits) → {i_hat_1, beta, p_hat}`
+- PHD-1/2/3 all resolved (see above)
+
+**§2.2  PolicyVarianceEstimator** (`cliff_detection/policy_variance.py`)
+- N=8 independent forward passes; `estimate(flow_head, ...) → {i_hat_2, sigma_sq}`
+
+**§2.3  VelocityCurvatureEstimator** (`cliff_detection/velocity_curvature.py`)
+- Anchor τ=0.5, episode-fixed noise; `update(flow_head, ...) → {i_hat_3, cond_diff_sq}`
+- `ShortcutFlowActionHead.velocity()` and `.compute_cond()` added as public methods
+
+**§2.4  ConcordanceDetector** (`cliff_detection/concordance.py`)
+- W=50, mid-rank convention, warmup suppression; `step(i1, i2, i3) → {triggered, concordance, ranks}`
+- `cliff_detection/__init__.py` updated to export all four classes
+
+**§2.5  PredictiveInfoEstimator** (`phase_centric/theory_utils.py`)
+- Bilinear InfoNCE critic; `forward(x, c) → {mi_lower_bound, logits}`
+- `estimate_per_timestep(x_seq, c_seq) → (T,)` for oracle calibration
+
+**§2.6  PCAR upgrade** (`phase_centric/pcar_trigger.py`, `configuration_phaseqflow.py`)
+- `PCARTrigger.update_and_check(beta)` → `update_and_check(signal)` (positional BC preserved)
+- `pcar_input_signal: str = "concordance"` added to `PhaseQFlowConfig`
+- `PCARTrigger.input_signal` attribute set from config
+
+- Tests: 94 → 123 passed (+29: test_cliff_estimators_phase_b.py×19, test_concordance.py×10)
+- Smoke: 7-mode all pass
+- New dependencies introduced: none
+
+---
+
+### Phase B (initial) Completed 2026-04-30
 
 - Added cliff-namespace public-facing interfaces:
   - Created `phase_centric/cliff_estimators.py`:
@@ -88,7 +100,6 @@ $C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}) + \mathrm{rank}_W(\hat I^{(2)})
 - Tests: 80 → 94 passed (14 new cliff-estimator tests)
 - Smoke: 7-mode all pass
 - New dependencies introduced: none
-- 94 pytest passed, 7-mode smoke passed
 
 ---
 
@@ -120,8 +131,8 @@ $C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}) + \mathrm{rank}_W(\hat I^{(2)})
 | Predictability Cliff | (concept) | cliff |
 | Boundary probability β_t | `phase_beta`, `beta_t` | — (internal only) |
 | Cliff estimator I^(1) | `-phase_beta` | `I_hat_1` |
-| Cliff estimator I^(2) | (pending PHD-1) | `I_hat_2` |
-| Cliff estimator I^(3) | (pending PHD-2) | `I_hat_3` |
-| Concordance C_t | (pending PHD-3) | `concordance_C` |
+| Cliff estimator I^(2) | `PolicyVarianceEstimator.estimate` → `i_hat_2` | `I_hat_2` |
+| Cliff estimator I^(3) | `VelocityCurvatureEstimator.update` → `i_hat_3` | `I_hat_3` |
+| Concordance C_t | `ConcordanceDetector.step` → `concordance` | `concordance_C` |
 | Phase posterior p̂_t | `phase_p_hat`, `p_hat` | — (internal only) |
 | Bhattacharyya distance β_t | `_bhattacharyya_beta` | — (internal only) |

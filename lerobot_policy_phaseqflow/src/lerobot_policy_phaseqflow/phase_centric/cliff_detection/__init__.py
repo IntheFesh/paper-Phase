@@ -14,7 +14,24 @@ Status: PLACEHOLDER — cliff_detection/ created in Phase A; implementations lan
 
 from __future__ import annotations
 
+from lerobot_policy_phaseqflow.phase_centric.cliff_detection.concordance import (
+    ConcordanceDetector,
+)
+from lerobot_policy_phaseqflow.phase_centric.cliff_detection.policy_variance import (
+    PolicyVarianceEstimator,
+)
+from lerobot_policy_phaseqflow.phase_centric.cliff_detection.posterior_bhattacharyya import (
+    PosteriorBhattacharyyaEstimator,
+)
+from lerobot_policy_phaseqflow.phase_centric.cliff_detection.velocity_curvature import (
+    VelocityCurvatureEstimator,
+)
+
 __all__ = [
+    "ConcordanceDetector",
+    "PolicyVarianceEstimator",
+    "PosteriorBhattacharyyaEstimator",
+    "VelocityCurvatureEstimator",
     "posterior_bhattacharyya",
     "policy_variance",
     "velocity_curvature",
