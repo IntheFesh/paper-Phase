@@ -1,4 +1,4 @@
-# PhaseQFlow++ and Phase-Centric VLA Architecture
+# PACE v2 Architecture
 
 > **Scope**: an architectural specification aimed at reproduction
 > engineers and algorithm reviewers. It takes the completed system
@@ -21,7 +21,7 @@
 
 ## 1 System Architecture
 
-PhaseQFlow++ is a four-layer generative policy for long-horizon
+PACE v2 is a four-layer generative policy for long-horizon
 robotic manipulation. The observation is explicitly decomposed as
 $x_t = \{V_t, S_t, L, H_t\}$ (vision, state, language, history)
 and flows through `VisionTokenizer` fusion,
@@ -211,7 +211,7 @@ participate in backprop.
 
 ## 2 Phase-Centric Theory Framework
 
-The theoretical motivation for Phase-Centric VLA is to promote
+The theoretical motivation for PACE v2 is to promote
 "phase" from a passive auxiliary feature to a first-class control
 variable that is identifiable, measurably changing, and
 budget-schedulable. This section lays out four mathematical
@@ -778,7 +778,7 @@ uniquely determined by a combination of feature-gate switches:
 
 | Config | InfoNCE (I1) | $\beta_t$ (I2) | PACE-A (I3) | PACE-B (I4) | PACE-C (I5) | PCAR (I6) | Scientific purpose |
 | :-- | :--: | :--: | :--: | :--: | :--: | :--: | :-- |
-| `baseline` | | | | | | | Control: plain PhaseQFlow++ pipeline |
+| `baseline` | | | | | | | Control: plain BC-Chunked pipeline |
 | `ident` | ✓ | | | | | | Measures the standalone contribution of InfoNCE identifiability |
 | `a` | | ✓ | ✓ | | | | PACE-A alone (needs $\beta_t$ to back it) |
 | `b` | | ✓ | | ✓ | | | PACE-B alone |
@@ -1078,7 +1078,7 @@ python scripts/verification/sanity_pace_a.py
 python scripts/verification/sanity_pace_b.py
 ```
 
-Expected: `77 passed`; the 7-mode smoke all returns `[OK]`; the 5
+Expected: `204 passed`; the 7-mode smoke all returns `[OK]`; the 5
 verification scripts each return PASS (or identifiability
 `WARN_DEGENERATE` when the CPU placeholder step count is too low).
 

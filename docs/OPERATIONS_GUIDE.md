@@ -1,4 +1,4 @@
-# Operations Guide · PhaseQFlow++ and Phase-Centric VLA
+# Operations Guide · PACE v2
 
 This is a pure engineering handbook: the full path from environment setup
 through training, evaluation, verification, paper artifacts, and export.
@@ -125,31 +125,39 @@ GPU is detected and uses very small defaults (`STEPS=2`,
 ## 8 Paper artifact pipeline
 
 ```bash
-# 1) train the ablation matrix
+# 1) train the 7-config ablation ladder
 bash scripts/training/run_ablation.sh
 
-# 2) aggregate into CSV + stats.json (95% CI + paired-t p-value)
-python scripts/paper/aggregate_ablation.py
+# 2) aggregate into CSV + LaTeX (IQM + 95% CI + Wilcoxon p + Cohen's d)
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
 
-# 3) three main figures
-python scripts/paper/generate_paper_figures.py
+# 3) five publication-grade figures
+python scripts/figures/fig1_universality.py \
+    --input paper_figures/universality/raw_distances.json \
+    --output paper_figures/fig1_universality.pdf
+python scripts/figures/fig2_method_overview.py
+python scripts/figures/fig3_phase_visualization.py --dry_run
+python scripts/figures/fig4_regret_scaling.py
+python scripts/figures/fig5_concordance_pr_curve.py
 
-# 4) booktabs LaTeX table
-python scripts/paper/generate_latex_table.py
-
-# 5) paper-ready Markdown summary
-python scripts/paper/generate_paper_stats.py
+# 4) diagnostic tools
+python scripts/diagnostics/diagnostic_utils/measure_boundary_error.py --dry_run
+python scripts/diagnostics/diagnostic_utils/replan_alignment.py --dry_run
+python scripts/diagnostics/diagnostic_utils/trigger_comparison.py --dry_run
+python scripts/diagnostics/diagnostic_utils/measure_inference_cost.py --dry_run
 ```
 
 Artifact locations:
 
-- `artifacts/ablation/stats.json` — main statistics table
-- `artifacts/paper_stats.md` — Markdown summary
-- `paper_figures/fig1_main_bar.png` — headline metric
-- `paper_figures/fig2_long_vs_spatial.png` — long-horizon vs spatial
-  generalisation
-- `paper_figures/fig3_beta_vs_sr.png` — $\beta@\text{replan}$ vs SR
-- `paper_figures/ablation_table.tex` — booktabs LaTeX
+- `paper_figures/ablation_v2/ablation_table_v2.csv` — per-method × benchmark IQM table
+- `paper_figures/ablation_v2/ablation_table_v2.tex` — booktabs LaTeX table
+- `paper_figures/fig1_universality.pdf` — cliff universality figure
+- `paper_figures/fig2_method_overview.pdf` — method block diagram
+- `paper_figures/fig3_phase_visualization.pdf` — phase + estimator + C_t visualization
+- `paper_figures/fig4_regret_scaling.pdf` — regret vs chunk-length H scaling
+- `paper_figures/fig5_concordance_pr_curve.pdf` — concordance PR curve
 
 CPU sandbox artifacts carry a `placeholder_stats=true` field; rerunning
 the same commands after a full GPU training + eval pipeline overwrites
@@ -178,7 +186,7 @@ Shares the `diagnostic_utils/` helper package with
   installed.
 - Check that the dataset path and HuggingFace network are reachable.
 - Before any large change, run `bash scripts/smoke/smoke_phase_centric.sh`.
-- `pytest tests/ -v` expects **80 passed**.
+- `pytest tests/ -v` expects **204 passed**.
 - One run per `output_dir`, so experiments are easy to trace.
 - Under CPU placeholder training, identifiability returning
   `WARN_DEGENERATE` is intentional (see
