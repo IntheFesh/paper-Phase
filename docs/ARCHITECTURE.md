@@ -1,11 +1,12 @@
 # PACE v2 Architecture
 
 > **Scope**: an architectural specification aimed at reproduction
-> engineers and algorithm reviewers. It takes the completed system
-> as its point of view and describes module signatures, tensor
-> shapes, mathematical derivations, ablation matrix, and the
-> verification suite. No development timeline, no
-> "backwards-compatibility" prose.
+> engineers and algorithm reviewers. It takes the current PACE v2
+> codebase as its reference point and describes module signatures,
+> tensor shapes, the cliff-detection theory, the seven-config
+> ablation matrix, and the verification suite. The four headings
+> below mirror the source-code organisation under
+> `lerobot_policy_phaseqflow/` and `configs/`.
 
 ---
 
@@ -13,21 +14,31 @@
 
 - [§1 System Architecture](#1-system-architecture)
 - [§2 Phase-Centric Theory Framework](#2-phase-centric-theory-framework)
-- [§3 The Six Phase-Centric Innovations in Detail](#3-the-six-phase-centric-innovations-in-detail)
-- [§4 Ablation Matrix Design](#4-ablation-matrix-design)
+- [§3 Cliff Estimators, Concordance, and PCAR](#3-cliff-estimators-concordance-and-pcar)
+- [§4 Ablation Matrix (v2, seven configs)](#4-ablation-matrix-v2-seven-configs)
 - [§5 Verification System](#5-verification-system)
 
 ---
 
 ## 1 System Architecture
 
-PACE v2 is a four-layer generative policy for long-horizon
-robotic manipulation. The observation is explicitly decomposed as
+PACE v2 is a three-layer generative policy for long-horizon
+robotic manipulation. The observation is decomposed as
 $x_t = \{V_t, S_t, L, H_t\}$ (vision, state, language, history)
-and flows through `VisionTokenizer` fusion,
-`HierarchicalPlanner` phase discretisation,
-`ShortcutFlowActionHead` action-chunk decoding, and
-`IQLChunkVerifier` closed-loop confidence arbitration.
+and flows through `DualBackboneVisionTokenizer` fusion,
+`HierarchicalPlanner` macro/micro phase discretisation, and
+`ShortcutFlowActionHead` action-chunk decoding. A separate
+**cliff-detection branch** taps off the planner and the flow
+head to produce a continuous "predictability cliff" signal that
+gates **PCAR** (PACE Closed-loop Adaptive Replanning) at
+inference time. Boundary-aware reweighting of the flow loss
+closes the loop at training time.
+
+The legacy A2C2 correction head, IQL chunk verifier, and BID
+sampler remain in the source tree but are gated off in every
+shipped config (`use_iql_verifier=false`, `use_correction_head=
+false`, `use_bid_sampling=false`). They are not part of the PACE
+v2 main path.
 
 ### 1.1 Data flow overview
 
@@ -51,63 +62,75 @@ and flows through `VisionTokenizer` fusion,
                                   │ context_tokens: (B, N_ctx, 256)
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 2 : HierarchicalPlanner                                      │
+  │  Layer 2 : HierarchicalPlanner   (phase_mode = "hierarchical")      │
   │  ─────────────────────────                                          │
-  │    FSQ (levels=[8,6,5], K=240)        ─►  phase_id   : (B,)         │
-  │      or Gumbel-Softmax (K=16)          ─►  phase_logits: (B, K)     │
-  │    Embedding(K, 32)                    ─►  phase_embed : (B, 32)    │
-  │    MLP(256→256→32)                     ─►  skill_latent: (B, 32)    │
+  │    Macro FSQ  (levels=[5,4],  K₁=20)   ─► z_macro    : (B,)         │
+  │    Micro FSQ  (levels=[6,5],  K₂=30)   ─► z_micro    : (B,)         │
+  │      (or flat FSQ K=240 / Gumbel K=16  with phase_mode = "flat")    │
+  │    Embedding(K_macro, 32)              ─► macro_embed: (B, 32)      │
+  │    Embedding(K_micro, 32)              ─► micro_embed: (B, 32)      │
+  │    InfoNCE heads (macro, micro)        ─► L_NCE_macro + 0.5·L_NCE_micro │
   └─────────────────────────────────────────────────────────────────────┘
                                   │ planner_out
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 3 : ShortcutFlowActionHead   (1-NFE at inference)            │
+  │  Layer 3 : ShortcutFlowActionHead   (4-NFE shortcut flow)           │
   │  ──────────────────────────────                                     │
-  │    cond = [fused_obs, phase_embed, skill_latent]  (B, 320→256)      │
+  │    cond = [fused_obs ⊕ macro_embed ⊕ micro_embed]  (B, 320→256)    │
   │    SmallDiT :  4 × _DiTBlock(AdaLN-Zero),  hidden=256,  heads=8     │
-  │    Training  : sample (t, d=2^{-k}), FM loss + self-consistency     │
-  │    Inference : x_1 = x_0 + v_θ(x_0, 0, 1 | cond),  1-NFE            │
-  │                                                                     │
+  │    Training : sample (t, d=2^{-k}); boundary-aware FM loss          │
+  │               L_FM = mean[(1 + λ·β_t^micro) · ||v_θ - v*||²]        │
+  │               + self-consistency L_sc                               │
+  │    Inference: x_1 = x_0 + v_θ(x_0, 0, 1 | cond),  4-NFE shortcut    │
   │    ──►  action chunk  A_t ∈ R^{Ta × Da}  =  (B, 16, 16)             │
   └─────────────────────────────────────────────────────────────────────┘
-                                  │ base_chunk
+                                  │ A_t
                                   ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 3b : A2C2CorrectionHead  (finetune_closedloop only)          │
-  │  ─────────────────────────────                                      │
-  │    DiT (hidden=640, 4 layers, 8 heads)                              │
-  │    input:  [obs_feat ⊕ base_chunk ⊕ step_norm]                      │
-  │    output: residual Δ_t                                             │
-  │    ──►  corrected_chunk = base_chunk + Δ_t                          │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Layer 4 : IQLChunkVerifier                                         │
-  │  ─────────────────────────                                          │
-  │    V_ψ(s, z)            ─► (B,)     expectile τ=0.8                 │
-  │    Q_θ(s, A, z)         ─► (B,)     TD(0) backup, γ=0.99            │
-  │    advantage = Q − V                                                │
-  │    confidence = σ(β · advantage),   β=3.0                           │
-  │    should_replan = (confidence < 0.5)                               │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Test-time :  BID sampler (N=5) → ACT temporal ensembling           │
-  │               exponential decay  w_i = exp(−m · age),  m=0.05       │
-  └─────────────────────────────────────────────────────────────────────┘
-                                  │
+                       (executed for ≤ H steps, or
+                        until PCAR fires a replan)
+
+           ┌──── parallel cliff branch (read-only) ──────────────┐
+           │                                                     │
+           │  I^(1)  =  -β_t                                     │
+           │            (PhasePosteriorEstimator, IMPLEMENTED)   │
+           │                                                     │
+           │  I^(2)  =  -σ_t²    [PolicyVarianceEstimator]       │
+           │            (anchor multi-sample; PENDING)           │
+           │                                                     │
+           │  I^(3)  =  -||v_θ(c_t) - v_θ(c_{t-1})||²            │
+           │            (VelocityCurvatureEstimator; PENDING)    │
+           │                                                     │
+           │  Concordance  C_t  =  1/3 · Σ_k rank_W(I^(k))      │
+           │                       (PENDING; rank-window W=50)   │
+           │                                                     │
+           │  PCAR trigger:  budget-quantile  τ_t = Q̂_n(1-ε)    │
+           │                 replan ⇔ C_t > τ_t                  │
+           │                 (or BayesianPCARTrigger Beta-mix)   │
+           └─────────────────────────────────────────────────────┘
+                                  │  replan? → re-encode obs and rerun L1-L3
                                   ▼
                           a_t ∈ R^{Da}   (executed)
 ```
+
+**Implementation status caveat.** Of the three cliff estimators
+only $I^{(1)}$ (Bhattacharyya $\beta_t$) is currently
+implemented end-to-end. The public cliff-namespace functions
+`compute_I_hat_2`, `compute_I_hat_3`, and `compute_concordance_C`
+in
+`lerobot_policy_phaseqflow/phase_centric/cliff_estimators.py`
+raise `NotImplementedError`; their algorithmic details are
+specified below in §3 but the multi-sample anchor mechanism for
+$I^{(2)}$ and the velocity-anchor exposure for $I^{(3)}$ are
+still open. Until those are landed, ablations 03/04/05/07 fall
+back to whichever signal `pcar_input_signal` resolves to inside
+`PCARTrigger` (defaulting to $\beta_t$).
 
 ### 1.2 Tensor shape table
 
 Conventions: $B$ batch, $V$ number of cameras ($=2$), $T_a$ action
 chunk length ($=16$), $D_a$ action dimension ($=16$), $D=256$
-fusion hidden size, $K$ phase codebook size,
-$L_{\text{tok}}=16$ T5 token count.
+fusion hidden size, $K_1=20$ macro / $K_2=30$ micro phase codebook
+sizes, $L_{\text{tok}}=16$ T5 token count.
 
 | Stage | Tensor | Shape | Note |
 | :-- | :-- | :-- | :-- |
@@ -122,61 +145,72 @@ $L_{\text{tok}}=16$ T5 token count.
 | L1 | `language_tokens` | $(B, 1, 256)$ | T5 mean-pool + FiLM |
 | L1 | `fused_obs` | $(B, 256)$ | uncertainty-gate output |
 | L1 | `context_tokens` | $(B, N_{\text{ctx}}, 256)$ | $[s, h, l, r]$ concat |
-| L2 | `phase_logits` | $(B, K)$ | $K=240$ (FSQ) / $16$ (Gumbel) |
-| L2 | `phase_id` | $(B,)$ | long tensor |
-| L2 | `phase_embed` | $(B, 32)$ | `Embedding(K, 32)` |
-| L2 | `skill_latent` | $(B, 32)$ | continuous skill latent |
+| L2 | `macro_logits` | $(B, K_1)$ | K₁=20 (hierarchical) |
+| L2 | `micro_logits` | $(B, K_2)$ | K₂=30 (hierarchical) |
+| L2 | `z_macro / z_micro` | $(B,)$ | discrete phase ids |
+| L2 | `macro_embed / micro_embed` | $(B, 32)$ | `Embedding(K, 32)` |
 | L3 | FM input $x_t$ | $(B, T_a, D_a)$ | training |
-| L3 | cond vector | $(B, 256)$ | `conditioner([obs, z^p, z^s])` |
-| L3 | `action_pred` | $(B, 16, 16)$ | one forward pass |
-| L3b | residual | $(B, 16, 16)$ | A2C2 output |
-| L4 | $V_\psi$ | $(B,)$ | state-value |
-| L4 | $Q_\theta$ | $(B,)$ | state-action value |
-| L4 | `chunk_confidence` | $(B,)$ | $\sigma(\beta \cdot A)$ |
-| rollout | BID candidates | $(N, T_a, D_a)$ | $N=5$ |
-| rollout | executed action | $(D_a,)$ | averaged by ensembler |
+| L3 | cond vector | $(B, 256)$ | `conditioner([obs ⊕ z^macro ⊕ z^micro])` |
+| L3 | `action_pred` | $(B, 16, 16)$ | 4-NFE shortcut decoding |
+| Cliff | $\beta_t$ | $(B,)$ | $1-\sum_k\sqrt{\hat p_t \hat p_{t-1}}$, micro-level |
+| Cliff | $\sigma_t^2$ | $(B,)$ | per-step ensemble variance (PENDING) |
+| Cliff | $\kappa_t$ | $(B,)$ | velocity-anchor $L^2$ jump (PENDING) |
+| Cliff | $C_t$ | $(B,)$ | rank-window mean of $I^{(1/2/3)}$ (PENDING) |
+| PCAR | `should_replan` | $(B,)$ bool | scalar threshold check |
 
 ### 1.3 Core module signatures
 
-All modules are defined in
+The L1/L2/L3 modules are defined in
 `lerobot_policy_phaseqflow/src/lerobot_policy_phaseqflow/modeling_phaseqflow.py`;
-the Phase-Centric sub-modules live in the sibling
+the cliff-detection sub-modules live in the sibling
 `phase_centric/` subpackage.
 
 ```python
 class DualBackboneVisionTokenizer(nn.Module):
-    # modeling_phaseqflow.py:335
+    # modeling_phaseqflow.py
     def forward(self, images, states, language_ids, language_mask,
                 history, masks) -> Dict[str, Tensor]:
         # keys: fused, context_tokens, vision_tokens, state_tokens,
         #       language_tokens, history_tokens, uncertainty_gate
 
 class HierarchicalPlanner(nn.Module):
-    # modeling_phaseqflow.py:723
+    # modeling_phaseqflow.py
     def forward(self, fused_obs, phase_labels=None,
                 phase_mode=None) -> Dict[str, Tensor]:
-        # keys: phase_id, phase_logits, phase_embed, skill_latent
+        # hierarchical: macro_logits, micro_logits, z_macro, z_micro,
+        #               macro_embed, micro_embed
+        # flat:         phase_logits, phase_id, phase_embed, skill_latent
 
 class ShortcutFlowActionHead(nn.Module):
-    # modeling_phaseqflow.py:899
-    def forward(self, fused_obs, phase_embed, skill_latent,
-                actions_gt=None, training=True) -> Dict[str, Tensor]:
+    # modeling_phaseqflow.py
+    def forward(self, fused_obs, macro_embed, micro_embed,
+                actions_gt=None, beta_t=None, training=True
+                ) -> Dict[str, Tensor]:
         # training keys: fm_loss, sc_loss, action_pred, v_pred, v_target
-        # inference keys: action_pred
+        # inference keys: action_pred (4-NFE shortcut)
 
-class A2C2CorrectionHead(nn.Module):
-    # modeling_phaseqflow.py:1018
-    def forward(self, obs_feat, base_chunk,
-                step_in_chunk: int | Tensor) -> Tensor:
-        # returns corrected chunk (B, Ta, Da)
+# Cliff branch (phase_centric/)
+class PhasePosteriorEstimator(nn.Module):
+    # phase_centric/phase_posterior.py
+    @staticmethod
+    def _bhattacharyya_beta(p_cur, p_prev) -> Tensor
+    def forward_sequence(phase_logits) -> {p_hat, beta}    # batched
+    def step(phase_logits_t)            -> {p_hat, beta}    # rollout
 
-class IQLChunkVerifier(nn.Module):
-    # modeling_phaseqflow.py:1146
-    def forward(self, fused_obs, predicted_action,
-                phase_embed) -> Dict[str, Tensor]:
-        # keys: v, q, advantage, chunk_confidence, should_replan
-    def compute_critic_losses(self, ...) -> Tuple[Tensor, Tensor]
-    def soft_update_target(self) -> None  # Polyak τ=0.005
+# Public cliff-namespace API (phase_centric/cliff_estimators.py)
+def compute_I_hat_1(phase_beta) -> Tensor             # IMPLEMENTED  (= -β_t)
+def compute_I_hat_2(action_samples=None)              # PENDING  (NotImplementedError)
+def compute_I_hat_3(v_theta_ct, v_theta_ct_prev)      # PENDING  (NotImplementedError)
+def compute_concordance_C(i_hat_values, window_size)  # PENDING  (NotImplementedError)
+
+class PCARTrigger:                                    # phase_centric/pcar_trigger.py
+    history: Deque[float]                              # maxlen=1000
+    warmup_min: int = 50
+    budget_eps: float = 0.1
+    def update_and_check(signal: float) -> bool        # returns replan flag
+
+class BayesianPCARTrigger:                            # phase_centric/b_pcar.py
+    # Beta-mixture posterior P(changepoint | history); same .update_and_check API
 ```
 
 ### 1.4 Training stack
@@ -186,26 +220,35 @@ class IQLChunkVerifier(nn.Module):
 | Precision | `bf16` | `adam_eps=1e-6` avoids underflow |
 | Optimizer | PagedAdamW8bit | `bitsandbytes`, falls back to `torch.optim.AdamW` |
 | $(\beta_1, \beta_2)$ | $(0.9,\ 0.95)$ | common for large models |
-| Grad clip | $\lVert g \rVert_2 \le 1.0$ | — |
+| Grad clip | $\lVert g \rVert_2 \le 1.0$ | global norm |
 | Schedule | Cosine, warmup=500 | `transformers.get_cosine_schedule_with_warmup` |
 | EMA | decay $=0.9999$, power $=0.75$ | applied only to `flow_action_head` |
-| Grad ckpt | TransformerEncoderLayer | ~35% memory savings |
+| Grad ckpt | TransformerEncoderLayer | roughly 35% memory savings |
 | Param groups | backbone / LoRA / head | lr $\in \{0,\ 5\!\times\!10^{-5},\ 10^{-4}\}$ |
-| Action norm | quantile [0.01, 0.99] → $[-1, 1]$ | RDT-style |
+| Action norm | quantile [0.01, 0.99] $\to [-1, 1]$ | RDT-style |
 | State noise | Gaussian injection at SNR $40$ dB | training regulariser |
 
-### 1.5 Four-stage curriculum
+### 1.5 Three-stage curriculum
+
+PACE v2 ships with three training stages, declared in
+`configs/train/`:
 
 | Stage YAML | Unfrozen modules | Main loss | Purpose |
 | :-- | :-- | :-- | :-- |
-| `pretrain_multimodal.yaml` | vision/language adapter | contrastive + MLM | multimodal alignment |
-| `train_latent.yaml` | planner + InfoNCE head | $\mathcal{L}_{\text{phase}}+\mathcal{L}_{\text{InfoNCE}}$ | phase codebook identifiability |
-| `train_flow.yaml` | flow action head | $\mathcal{L}_{\text{FM}}+\mathcal{L}_{\text{sc}}$ | shortcut-conditional flow |
-| `finetune_closedloop.yaml` | IQL critic + A2C2 | $\mathcal{L}_{\text{IQL}}+\mathcal{L}_{\text{A2C2}}$ | closed-loop correction |
+| `01_pretrain_multimodal.yaml` | vision/language adapter | vision–state contrastive + masked modelling + future-token prediction | multimodal token alignment; phase-centric features off |
+| `02_train_phase_and_flow.yaml` | hierarchical planner + flow head | $\mathcal{L}_{\text{imit}} + 0.5\,\mathcal{L}_{\text{flow}} + 0.1\,\mathcal{L}_{\text{InfoNCE}}^{\text{macro+micro}}$ | joint train of phase encoder and boundary-aware flow head |
+| `03_finetune_replan.yaml` | PCAR / B-PCAR / concordance-window calibration only | calibration objective on held-out LIBERO-Long split | freeze main net; tune the replanning trigger |
 
-Stage switching is driven by the `PhaseQFlowConfig.stage` field, and
-the matching `stage_freeze_*` flags control which sub-modules
-participate in backprop.
+Stage switching is driven by `PhaseQFlowConfig.stage` ($\in
+\{\texttt{pretrain\_multimodal},
+\texttt{train\_phase\_and\_flow},
+\texttt{finetune\_replan}\}$), and the corresponding
+`stage_freeze_*` and `freeze_all_main` flags decide which
+sub-modules participate in backprop. The previous four-stage
+recipe (separate `train_latent` and `train_flow` stages) was
+collapsed into stage 2 in v2 because the InfoNCE-identifiability
+loss and the boundary-aware flow loss were found to be
+co-trainable without curriculum staging.
 
 ---
 
