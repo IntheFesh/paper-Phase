@@ -78,6 +78,7 @@ class PCARTrigger:
     ) -> None:
         """Validate the budget and initialise the rolling history."""
         self.cfg = cfg
+        self.input_signal: str = str(getattr(cfg, "pcar_input_signal", "concordance"))
         self.budget: float = float(getattr(cfg, "pcar_trigger_budget_eps", 0.1))
         if not (0.0 < self.budget < 1.0):
             raise ValueError(
@@ -88,13 +89,16 @@ class PCARTrigger:
         self.manual_threshold: float = float(
             getattr(cfg, "pcar_change_threshold", 0.4)
         )
-        self.beta_history: deque[float] = deque(maxlen=self.history_size)
+        self.beta_history: deque[float] = deque(maxlen=self.history_size)  # signal history
         self._triggered_count: int = 0
         self._total_count: int = 0
         self._last_threshold: float = self.manual_threshold
 
-    def update_and_check(self, beta: float) -> bool:
-        """Push a fresh ``beta_t`` and return whether it triggers a replan.
+    def update_and_check(self, signal: float) -> bool:
+        """Push a fresh signal value and return whether it triggers a replan.
+
+        ``signal`` is the concordance C_t (PACE v2 default) or the legacy
+        Bhattacharyya beta_t when ``pcar_input_signal="beta"``.
 
         Adaptive rule: once the rolling window holds ``>= warmup_min``
         samples, the threshold is the ``1 - budget`` quantile of the
@@ -102,7 +106,7 @@ class PCARTrigger:
         as a manual warm-start.
         """
 
-        b = float(beta)
+        b = float(signal)
         self.beta_history.append(b)
         self._total_count += 1
 

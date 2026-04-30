@@ -190,6 +190,7 @@ class PhaseQFlowConfig(PreTrainedConfig):
     curriculum_max_boundaries_stage2: int = 3
 
     use_pcar: bool = False
+    pcar_input_signal: str = "concordance"  # "concordance" (PACE v2) or "beta" (legacy)
     pcar_change_threshold: float = 0.4
     pcar_trigger_budget_eps: float = 0.1
     pcar_dual_head: bool = False
