@@ -1,0 +1,32 @@
+# Sanity ablation: random phase assignments.
+#
+# The FSQ skill encoder is replaced by a random code sampler that assigns
+# uniformly random phase codes at each timestep, breaking any learned
+# phase structure.  This tests whether performance gains come from phase
+# structure specifically or from the additional parameters / training.
+#
+# Expected: SR(random_phase) ≈ SR(bc_chunked) — random phase cannot
+# improve over the BC baseline.
+#
+# Note: requires a code path that randomly samples from the FSQ codebook
+# rather than using the encoder output.  Set via use_random_phase_sanity=True
+# (add to PhaseQFlowConfig if this sanity check is activated for a paper run).
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "sanity_random_phase"
+ablation_description: "Sanity: random phase assignment (breaks phase structure)"
+
+phaseqflow:
+  use_phase_boundary_posterior: false
+  use_pcar: false
+  use_chunk_infonce: false
+  use_pace_a: false
+  use_boundary_reweight: false
+  phase_mode: "flat"
+  # use_random_phase_sanity: true   # uncomment when config field is added
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false

@@ -1,0 +1,39 @@
+# Ablation 7: Full method — concordance cliff detection + boundary-aware flow loss.
+#
+# This is the complete PACE v2 system as described in the paper.
+# Three cliff estimators (I^(1), I^(2), I^(3)) are fused via rank-based
+# concordance C_t to trigger PCAR replanning, AND the shortcut flow loss
+# uses per-step boundary weights w(beta) = 1 + lambda_beta * beta_t^micro.
+#
+# Expected: SR(07) >= SR(05) — boundary reweighting helps the flow head
+# produce more accurate predictions across phase transitions.
+#
+# This is the "full" row in Table 2 of the paper.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "07_cliff_concordance_with_boundary_reweight"
+ablation_description: "Full PACE v2: concordance + boundary-aware flow loss"
+
+phaseqflow:
+  use_phase_boundary_posterior: true
+  use_pcar: true
+  pcar_input_signal: "concordance"
+
+  use_chunk_infonce: true
+  use_pace_a: true                      # enables boundary-aware flow loss
+  use_boundary_reweight: true
+  boundary_reweight_lambda: 0.5
+
+  phase_mode: "hierarchical"
+  fsq_levels_macro: [5, 4]
+  fsq_levels_micro: [6, 5]
+
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false
+
+  pcar_change_threshold: 0.4
+  pcar_trigger_budget_eps: 0.1

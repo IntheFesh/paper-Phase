@@ -1,0 +1,29 @@
+# Sanity ablation: oracle boundary signal for flow-loss reweighting.
+#
+# The boundary-aware flow loss uses ground-truth gripper-flip timesteps
+# as the boundary mask instead of the learned Bhattacharyya beta_t signal.
+# This isolates whether the performance gain of boundary reweighting comes
+# from the quality of the boundary signal or from the reweighting mechanism.
+#
+# Expected: SR(oracle_boundary) >= SR(07_concordance_with_boundary_reweight),
+# confirming that better boundary detection → better flow loss.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "sanity_oracle_boundary"
+ablation_description: "Sanity: oracle boundary for flow-loss reweighting (upper bound)"
+
+phaseqflow:
+  use_phase_boundary_posterior: false   # learned signal replaced by oracle
+  use_pcar: false
+  use_chunk_infonce: false
+  use_pace_a: true
+  use_boundary_reweight: true
+  boundary_reweight_lambda: 0.5
+  # use_oracle_boundary_sanity: true    # uncomment when config field is added
+  phase_mode: "flat"
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false

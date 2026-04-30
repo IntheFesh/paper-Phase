@@ -1,0 +1,27 @@
+# Ablation 2: Cliff detection via I^(1) only (Bhattacharyya beta signal).
+#
+# PCAR is enabled and driven by the Bhattacharyya boundary signal beta_t
+# (= 1 - BC(p_hat_t, p_hat_{t-1})) computed by PhasePosteriorEstimator.
+# No concordance fusion; I^(2) and I^(3) are not computed.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "02_cliff_via_beta_only"
+ablation_description: "Cliff via I-hat-1 only (Bhattacharyya beta)"
+
+phaseqflow:
+  use_phase_boundary_posterior: true
+  use_pcar: true
+  pcar_input_signal: "beta"          # drives PCAR directly from beta_t
+
+  use_chunk_infonce: true
+  use_pace_a: false
+  use_boundary_reweight: false
+
+  phase_mode: "flat"                 # no hierarchical overhead for single-signal ablation
+
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false

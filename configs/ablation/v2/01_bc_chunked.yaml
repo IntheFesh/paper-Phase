@@ -1,0 +1,37 @@
+# Ablation 1: BC-Chunked baseline — no cliff detection, fixed-H replanning.
+#
+# All cliff detection, phase posterior, boundary reweighting, and
+# concordance mechanisms are disabled.  The policy acts as a standard
+# chunked behaviour-cloning policy that replans every action_chunk_size steps.
+# This is the most ablated configuration and serves as the lower-bound baseline.
+#
+# Inherits base architecture from configs/train/02_train_phase_and_flow.yaml;
+# only the overridden fields are listed here.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "01_bc_chunked"
+ablation_description: "BC-Chunked: no cliff detection, fixed-H replanning"
+
+phaseqflow:
+  # --- Cliff detection: all disabled ---
+  use_phase_boundary_posterior: false
+  use_pcar: false
+  pcar_input_signal: "concordance"   # irrelevant when use_pcar=false
+
+  # --- Phase identifiability: disabled ---
+  use_chunk_infonce: false
+
+  # --- Boundary-aware flow: disabled ---
+  use_pace_a: false
+  use_boundary_reweight: false
+
+  # --- Phase encoder: flat (no hierarchical overhead) ---
+  phase_mode: "flat"
+
+  # --- Other deprecated components: off ---
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false

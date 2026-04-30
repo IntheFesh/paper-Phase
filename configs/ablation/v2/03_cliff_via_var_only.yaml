@@ -1,0 +1,28 @@
+# Ablation 3: Cliff detection via I^(2) only (action-ensemble variance).
+#
+# PCAR is triggered by the policy variance estimator signal (i_hat_2 = -sigma_t^2).
+# No concordance fusion; I^(1) and I^(3) are not used for triggering.
+# pcar_input_signal="variance" routes the PolicyVarianceEstimator output
+# through the PCAR trigger without rank-based fusion.
+
+policy: phaseqflow
+stage: train_phase_and_flow
+ablation_id: "03_cliff_via_var_only"
+ablation_description: "Cliff via I-hat-2 only (action-ensemble variance)"
+
+phaseqflow:
+  use_phase_boundary_posterior: false   # I^(1) not used for triggering
+  use_pcar: true
+  pcar_input_signal: "variance"         # routed from PolicyVarianceEstimator
+
+  use_chunk_infonce: false
+  use_pace_a: false
+  use_boundary_reweight: false
+
+  phase_mode: "flat"
+
+  use_iql_verifier: false
+  use_correction_head: false
+  use_bid_sampling: false
+  use_pace_c: false
+  use_pace_b: false
