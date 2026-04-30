@@ -1,0 +1,12 @@
+policy: phaseqflow
+stage: train_flow
+notes: train conditional flow action head under fixed/semi-fixed planner
+phaseqflow:
+  weak_phase_supervision_mode: hybrid
+  use_value_guided_weight: true
+  flow_steps: 4
+losses:
+  flow_matching: 1.0
+  phase_aware_chunk_boundary: 0.25
+  action_smoothness: 0.05
+  mode_coverage_entropy: 0.1

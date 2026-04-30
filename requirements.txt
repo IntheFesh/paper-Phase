@@ -1,0 +1,61 @@
+# Additional Python package requirements for PhaseQFlow.
+
+# These packages augment the base LeRobot installation.  They provide
+# utilities for logging, linear algebra, configuration management, and
+# image handling.  You should already have LeRobot installed in your
+# working environment.
+
+wandb
+einops>=0.7
+opencv-python
+hydra-core
+pyyaml
+tqdm
+numpy
+pandas
+matplotlib
+
+# Vision backbone upgrade (Round 1): dual SigLIP2 + DINOv2 encoders with
+# LoRA/DoRA adapters and FiLM-T5 language conditioning.  RTX 5070 (SM120)
+# uses PyTorch SDPA, so flash-attn is intentionally NOT a dependency.
+timm>=1.0.9
+transformers>=4.45
+peft>=0.12
+safetensors
+
+# Hierarchical planner upgrade (Round 2): FSQ (Finite Scalar Quantization) as
+# a drop-in replacement for Gumbel-Softmax discrete phase coding, plus an
+# InfoNCE auxiliary contrastive loss to sharpen phase boundaries.  See
+# Mentzer et al., arXiv 2309.15505 and Lee et al., arXiv 2403.03181.
+vector-quantize-pytorch>=1.17.0
+
+# Training-pipeline upgrade (Round 3): bf16 + PagedAdamW8bit + EMA for the
+# flow head + cosine schedule + gradient checkpointing.  `diffusers` is used
+# solely for `EMAModel`; `accelerate` is optional but recommended to keep
+# launch scripts uniform with LeRobot/Octo.  See pi0 / OpenVLA / RDT-1B for
+# the bf16 convention and Diffusion Policy (arXiv 2303.04137) for EMA
+# hyper-parameters.
+diffusers>=0.30
+accelerate>=0.33
+
+# Optional legacy dependency. ``bitsandbytes`` powers the Round-3
+# ``PagedAdamW8bit`` optimizer path in ``training_utils.py`` but is NOT
+# required by Phase-Centric VLA (Round 2+). If absent the optimizer builder
+# falls back to plain AdamW automatically. Kept pinned here for backward
+# compatibility with existing cloud scripts; do NOT add new dependencies on
+# bnb in Phase-Centric modules.
+bitsandbytes>=0.43 ; platform_system != "Darwin"
+
+# Phase-Centric VLA (Round 2 infrastructure): scipy for Bayesian online
+# changepoint detection in PCAR (Round 7) and diagnostic t-test / pearsonr.
+# Other Round-2 requested deps are already pinned above at stricter versions:
+#   - FSQ codebook (Round 3 InfoNCE): ``vector-quantize-pytorch>=1.17.0``
+#     (same library distributed by lucidrains; the alias
+#     ``lucidrains-vector-quantize-pytorch`` on pypi is equivalent and
+#     intentionally not pulled in to avoid duplicate installs).
+#   - einops (Round 5+ PACE chunk re-arrangement): already ``einops>=0.7``.
+#   - transformers (Round 3+ InfoNCE stability): already ``transformers>=4.45``
+#     which satisfies the ``>=4.40`` requirement.
+# RTX 5070 (SM120) uses PyTorch SDPA — flash-attn is intentionally NOT a
+# dependency and must not be added by future rounds.
+scipy>=1.11

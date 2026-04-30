@@ -1,0 +1,14 @@
+{
+  "T": 120,
+  "K": 4,
+  "boundaries": [
+    40,
+    80
+  ],
+  "boundary_l2_mean": 0.44707581400871277,
+  "boundary_l2_max": 1.1833534240722656,
+  "interior_l2_mean": 4.022164284833707e-05,
+  "interior_l2_max": 0.00033691071439534426,
+  "acceptance_boundary_gt_0p3": true,
+  "acceptance_interior_lt_0p05": true
+}

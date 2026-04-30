@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-libero-phaseqflow-vla"
+version = "0.1.0"
+description = "Phase-Centric VLA on PhaseQFlow++ — open-source implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+# Authors anonymized for double-blind review. Will be updated upon publication.
+authors = []
+dependencies = []
+
+# The root package is mostly a container around the third-party
+# policy plugin.  The actual implementation lives in the
+# `lerobot_policy_phaseqflow` subpackage, which is a separate
+# Python package with its own pyproject.toml.

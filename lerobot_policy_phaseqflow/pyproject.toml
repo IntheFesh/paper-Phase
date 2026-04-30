@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_policy_phaseqflow"
+version = "0.1.0"
+description = "PhaseQFlow policy plug-in for LeRobot"
+requires-python = ">=3.10"
+# Authors anonymized for double-blind review. Will be updated upon publication.
+authors = []
+dependencies = [
+    "lerobot>=0.4.0",
+]
+
+# LeRobot 0.4+ registers policies via ``PreTrainedConfig.register_subclass``
+# inside ``configuration_phaseqflow.py`` (a draccus.ChoiceRegistry hook). The
+# legacy ``[project.entry-points]`` mechanism is no longer consumed by the
+# ``lerobot-train`` CLI and has been removed to avoid drift.

@@ -1,0 +1,17 @@
+{
+  "placeholder": true,
+  "note": "CPU dry-run placeholder. Run run_eval_libero.sh on GPU checkpoint to overwrite libero_long_sr / libero_spatial_sr with real values.",
+  "config_mode": "baseline",
+  "seed": 42,
+  "total_steps": 3,
+  "libero_long_sr": 0.5917235802135468,
+  "libero_spatial_sr": 0.8184005802135467,
+  "beta_mean_when_replan": 0.7466459999999999,
+  "num_rollouts": 0,
+  "final_loss": 1.496208906173706,
+  "loss_history": [
+    1.402889609336853,
+    1.5931434631347656,
+    1.496208906173706
+  ]
+}
