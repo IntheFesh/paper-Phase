@@ -241,6 +241,7 @@ def evaluate_all_methods(
     tolerance: int = 5,
     rng: Optional[np.random.Generator] = None,
 ) -> List[Dict]:
+    """Aggregate TP/FP/FN across n_episodes for all 6 detectors and return per-detector P/R/F1 rows."""
     if rng is None:
         rng = np.random.default_rng(42)
 

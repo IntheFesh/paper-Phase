@@ -52,6 +52,7 @@ class BCActAdapter(PolicyAdapter):
         self._policy = None
 
     def is_available(self) -> bool:
+        """True iff ACTPolicy is importable and the checkpoint cache exists."""
         try:
             from lerobot.common.policies.act.modeling_act import ACTPolicy  # noqa: F401
         except ImportError:
@@ -62,6 +63,7 @@ class BCActAdapter(PolicyAdapter):
         return any((hf_cache / "hub").glob(f"models--{model_id}*"))
 
     def load(self) -> None:
+        """Download (if needed) and load the ACT checkpoint onto self.device."""
         from lerobot.common.policies.act.modeling_act import ACTPolicy
         import torch
 
@@ -71,6 +73,7 @@ class BCActAdapter(PolicyAdapter):
         self._loaded = True
 
     def rollout(self, env: Any, n_steps: int, seed: int = 0) -> RolloutResult:
+        """Run one episode with chunked ACT execution; re-queries the policy every chunk_size steps."""
         if not self._loaded:
             raise RuntimeError("call load() first")
 

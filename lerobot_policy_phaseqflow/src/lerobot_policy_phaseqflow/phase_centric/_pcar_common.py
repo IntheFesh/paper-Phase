@@ -14,7 +14,11 @@ import numpy as np
 
 
 def make_history(maxlen: int) -> Deque[float]:
-    """Create a capped rolling history deque."""
+    """Create a capped rolling deque for the signal history shared by both trigger classes.
+
+    Using a shared factory (rather than inline ``deque(maxlen=…)``) keeps the
+    maxlen type-cast and any future logging hooks in one place.
+    """
     return deque(maxlen=int(maxlen))
 
 
@@ -22,7 +26,7 @@ def rolling_quantile(
     history: Deque[float],
     q: float,
 ) -> float:
-    """Return the q-th quantile of ``history`` via numpy.
+    """Return the q-th quantile of ``history`` via numpy — shared by both trigger classes to guarantee identical quantile semantics.
 
     Parameters
     ----------
@@ -41,7 +45,7 @@ def rolling_quantile(
 
 
 def validate_budget(budget: float) -> None:
-    """Raise ValueError if budget is outside the open interval (0, 1)."""
+    """Raise ValueError if budget is outside (0, 1) — catches misconfigured firing-rate targets early."""
     if not (0.0 < budget < 1.0):
         raise ValueError(
             f"pcar_trigger_budget_eps must be in (0, 1); got {budget}"

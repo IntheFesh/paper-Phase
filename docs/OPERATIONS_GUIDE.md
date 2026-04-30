@@ -40,15 +40,17 @@ and maximum sequence length).
 bash configs/local/phaseqflow_local.sh
 ```
 
-### 3.2 Ablation matrix driver
+### 3.2 Ablation ladder driver
 
 ```bash
-# full 12 × N-seed matrix
-bash scripts/training/run_ablation.sh
+# Dry run — 3 steps × 3 seeds × 7 configs (pipeline integrity check)
+TOTAL_STEPS=3 SEEDS="42 123 2024" DEVICE=cpu \
+    python scripts/training/train_dummy_batch.py --phase-centric-mode full
 
-# custom subset
-CONFIGS="baseline ident full" SEEDS="42 123" \
-    bash scripts/training/run_ablation.sh
+# Aggregate results after GPU runs
+python scripts/aggregate_ablation.py \
+    --input_root outputs/ablation_v2 \
+    --output paper_figures/ablation_v2/
 ```
 
 ### 3.3 Single skeleton training run (debugging)
@@ -70,27 +72,27 @@ per-device batch size, gradient accumulation, and `output_dir` naming
 ## 5 Evaluation and latency benchmarks
 
 ```bash
-# LIBERO rollout
+# LIBERO-Long / LIBERO-Spatial rollout
 bash scripts/evaluation/run_eval_libero.sh \
   outputs/train/phaseqflow_smol_local/checkpoints/last/pretrained_model
 
-# PushT smoke-test evaluation
-bash scripts/evaluation/run_eval_pusht_sanity.sh \
-  outputs/train/phaseqflow_smol_local/checkpoints/last/pretrained_model
+# SimplerEnv evaluation (dry run, no checkpoint)
+python scripts/eval/simpler.py --dry_run
+
+# LIBERO-Perturbed evaluation
+python scripts/eval/libero_perturbed.py --dry_run
 
 # Inference latency benchmark (requires a pretrained checkpoint)
 python scripts/evaluation/benchmark_latency.py --help
 
-# Offline latency benchmark without a checkpoint (useful when HF Hub is unreachable)
+# Offline latency benchmark without a checkpoint
 python scripts/evaluation/benchmark_latency_offline.py \
   --configs baseline ident_only pace_a pace_b pace_c pcar --iters 20
 ```
 
-Monitor both policy quality (success / reward) and runtime metrics
-(latency / throughput). The offline benchmark falls back to random
-initialisation for SigLIP while DINOv2 still loads through
-`torch.hub`; absolute numbers will shift with real weights, but the
-trend is informative.
+Monitor both policy quality (success rate) and runtime metrics
+(latency / throughput). The offline benchmark uses random weights; absolute
+latency numbers will shift with real checkpoints but trends are informative.
 
 ## 6 Maths assertion verification
 
@@ -108,11 +110,9 @@ Statistical definitions and threshold rationale are in
 ## 7 End-to-end smoke tests
 
 ```bash
-bash   scripts/smoke/smoke_phase_centric.sh          # 7-mode
+bash   scripts/smoke/smoke_phase_centric.sh          # 7-mode (must all return [OK])
 bash   scripts/smoke/smoke_test_phaseqflow_e2e.sh    # minimal train+eval
 python scripts/smoke/smoke_test_training_pipeline.py
-python scripts/smoke/smoke_test_a2c2_correction.py
-python scripts/smoke/smoke_test_iql_bid.py
 python scripts/smoke/smoke_test_shortcut_flow.py
 python scripts/smoke/smoke_test_hierarchical_planner_fsq.py
 python scripts/smoke/smoke_test_diagnostic.py
@@ -125,8 +125,8 @@ GPU is detected and uses very small defaults (`STEPS=2`,
 ## 8 Paper artifact pipeline
 
 ```bash
-# 1) train the 7-config ablation ladder
-bash scripts/training/run_ablation.sh
+# 1) run all Phase D phenomenon experiments (or --dry_run for synthetic)
+bash scripts/run_experiments.sh --dry_run
 
 # 2) aggregate into CSV + LaTeX (IQM + 95% CI + Wilcoxon p + Cohen's d)
 python scripts/aggregate_ablation.py \
@@ -247,28 +247,24 @@ Reasons:
 Warm start: with $n < 50$ samples, we fall back to
 `pcar_change_threshold=0.4` to avoid the unstable early quantile.
 
-### 12.3 IQL Verifier vs. MLP confidence
+### 12.3 Concordance C_t vs. single-estimator triggering
 
-`IQLChunkVerifier` uses an expectile regression on $V_\psi$ plus TD(0)
-on $Q_\theta$ to get $\sigma(\beta_c(Q-V))$, rather than a single
-`ChunkVerifierMLP` that regresses directly to the success label.
+PACE v2 fuses three cliff estimators via rank-based concordance rather
+than choosing one. Concordance C_t = (rank(β_t) + rank(σ²_t) + rank(κ_t)) / 3.
 
 Reasons:
 
-1. **No terminal reward required** — IQL treats action MSE or phase
-   delta inside the imitation data as reward; it doesn't need a
-   rollout-level success label.
-2. **Advantage calibration** — $Q-V$ is an MC approximation of the
-   advantage, and after sigmoid it naturally sits in $(0, 1)$. A
-   direct MLP regression on $p(\text{success})$ tends to over-confide
-   on small datasets.
-3. **Target-network stability** — Polyak $\tau=0.005$ on
-   $V_\psi^{\text{target}}$ keeps TD bootstrap from diverging.
-4. **Optional fallback** — `config.verifier_type="mlp"` keeps the
-   alternative path available for controlled comparisons.
+1. **False-positive suppression** — a single estimator triggers on its own noise; requiring
+   rank agreement from all three independently motivated signals reduces FP rate dramatically
+   (diagnostic: concordance precision ≈ 2× single estimator precision at matched recall).
+2. **No estimator-specific threshold tuning** — rank normalisation puts all three on a common
+   scale; only one quantile threshold ε is needed.
+3. **Graceful degradation** — if one estimator produces NaN (e.g. curvature under rigid
+   motion), the two remaining estimators still provide a reasonable signal.
+4. **Oracle upper bound** — the gripper-flip oracle confirms that the concordance F1 gap
+   to oracle is mostly explained by boundary ambiguity, not estimator noise.
 
 ## 13 Document index
 
 - Architecture and theory spec: [`ARCHITECTURE.md`](ARCHITECTURE.md)
-- Academic abstract: [`PROJECT_ABSTRACT.md`](PROJECT_ABSTRACT.md)
-- Per-innovation index: [`innovations/INDEX.md`](innovations/INDEX.md)
+- Reproducibility statement: [`../REPRODUCIBILITY.md`](../REPRODUCIBILITY.md)

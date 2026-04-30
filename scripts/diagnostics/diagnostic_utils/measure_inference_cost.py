@@ -218,6 +218,7 @@ def _parse_args(argv=None):
 
 
 def main(argv=None) -> int:
+    """CLI entry point: report params / NFE / latency for each ablation config."""
     args = _parse_args(argv)
     rng = np.random.default_rng(42)
     if args.dry_run or args.checkpoint is None:

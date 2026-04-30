@@ -55,6 +55,7 @@ class DiffusionPolicyAdapter(PolicyAdapter):
         self._policy = None
 
     def is_available(self) -> bool:
+        """True iff lerobot DiffusionPolicy is importable and checkpoint exists in HF cache."""
         try:
             from lerobot.common.policies.diffusion.modeling_diffusion import (
                 DiffusionPolicy,
@@ -67,6 +68,7 @@ class DiffusionPolicyAdapter(PolicyAdapter):
         return any((hf_cache / "hub").glob(f"models--{model_id}*"))
 
     def load(self) -> None:
+        """Load the Diffusion Policy checkpoint and move it to self.device."""
         from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
         import torch
 
@@ -76,6 +78,7 @@ class DiffusionPolicyAdapter(PolicyAdapter):
         self._loaded = True
 
     def rollout(self, env: Any, n_steps: int, seed: int = 0) -> RolloutResult:
+        """Run one episode with single-step Diffusion Policy inference (n_inference_steps DDPM steps/call)."""
         if not self._loaded:
             raise RuntimeError("call load() first")
 

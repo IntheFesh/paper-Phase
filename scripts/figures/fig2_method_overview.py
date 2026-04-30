@@ -32,6 +32,7 @@ _RC = {
 
 
 def make_figure(output_path: Path) -> None:
+    """Draw the PACE v2 block-diagram schematic using matplotlib FancyBboxPatch."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -48,7 +49,8 @@ def make_figure(output_path: Path) -> None:
     ax.set_ylim(0, 4)
     ax.axis("off")
 
-    def box(cx, cy, w, h, label, sublabel="", color="#D0E8F2", fontsize=8):
+    def box(cx, cy, w, h, label, sublabel="", color="#D0E8F2", fontsize=8):  # draw a rounded rectangle with label
+
         rect = FancyBboxPatch(
             (cx - w / 2, cy - h / 2), w, h,
             boxstyle="round,pad=0.08", linewidth=0.8,
@@ -61,7 +63,7 @@ def make_figure(output_path: Path) -> None:
             ax.text(cx, cy - 0.22, sublabel, ha="center", va="center",
                     fontsize=6.5, color="#444", zorder=4)
 
-    def arrow(x0, y0, x1, y1):
+    def arrow(x0, y0, x1, y1):  # draw a solid arrowhead from (x0,y0) to (x1,y1)
         ax.annotate("", xy=(x1, y1), xytext=(x0, y0),
                     arrowprops=dict(arrowstyle="-|>", color="#333",
                                     lw=0.9, mutation_scale=10), zorder=5)
@@ -128,6 +130,7 @@ def make_figure(output_path: Path) -> None:
 
 
 def main(argv=None) -> int:
+    """CLI entry point for Figure 2."""
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, default=Path("paper_figures/fig2_method_overview.pdf"))
     args = p.parse_args(argv)

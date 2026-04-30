@@ -74,6 +74,11 @@ class BayesianPCARTrigger:
         beta_prior: float = 5.0,
         early_fire_threshold: float = 0.8,
     ) -> None:
+        """Validate the budget and initialise the rolling history and Beta prior.
+
+        Prior copies ``_alpha0``/``_beta0`` are stored separately so
+        :meth:`hard_reset` can restore the original prior without re-instantiating.
+        """
         self.input_signal: str = str(getattr(cfg, "pcar_input_signal", "concordance"))
         self.budget: float = float(getattr(cfg, "pcar_trigger_budget_eps", 0.1))
         validate_budget(self.budget)

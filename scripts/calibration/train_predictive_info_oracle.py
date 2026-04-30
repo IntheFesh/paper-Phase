@@ -118,6 +118,7 @@ def train(
 
 
 def main(argv=None) -> int:
+    """CLI entry point: train the InfoNCE oracle on synthetic (x,c) pairs and save checkpoint."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dry_run", action="store_true", help="Use small-scale settings for a quick smoke run")
     p.add_argument("--x_dim", type=int, default=64)

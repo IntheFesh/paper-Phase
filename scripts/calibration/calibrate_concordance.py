@@ -109,6 +109,7 @@ def _sweep_concordance(
 
 
 def main() -> None:
+    """CLI entry point: sweep (window W, threshold theta) and report concordance trigger rates."""
     parser = argparse.ArgumentParser(description="Calibrate ConcordanceDetector")
     parser.add_argument("--rollout_dir", default=None,
                         help="Directory of rollout JSON files")

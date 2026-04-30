@@ -164,6 +164,7 @@ def _parse_args(argv=None):
 
 
 def main(argv=None) -> int:
+    """CLI entry point: compute PCAR replan P/R/F1 vs gripper-flip oracle."""
     args = _parse_args(argv)
     if args.dry_run or args.checkpoint is None:
         results = _synthetic_run(tolerance=args.tolerance)
