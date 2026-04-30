@@ -1,0 +1,17 @@
+# Stage 3 of 3: freeze main network; calibrate PCAR / B-PCAR / Concordance only
+# Replaces the former stage 4 (calibration-only fine-tuning).
+policy: phaseqflow
+stage: finetune_replan
+notes: >
+  All main network weights are frozen.  Only the replanning calibration
+  modules (B-PCAR threshold, concordance window) are updated.
+  Uses a held-out LIBERO-Long split for calibration rollouts.
+phaseqflow:
+  freeze_vision_encoder: true
+  freeze_all_main: true
+  calibration_only: true
+  calibration_dataset: libero_long_holdout
+  pcar_input_signal: concordance
+calibrate:
+  - b_pcar
+  - concordance

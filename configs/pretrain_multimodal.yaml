@@ -1,3 +1,4 @@
+# DEPRECATED: see configs/train/01_pretrain_multimodal.yaml for PACE v2 schedule
 policy: phaseqflow
 stage: pretrain_multimodal
 notes: train tokenizer/cross-attention with frozen vision backbone

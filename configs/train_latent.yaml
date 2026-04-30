@@ -1,3 +1,4 @@
+# DEPRECATED: see configs/train/02_train_phase_and_flow.yaml for PACE v2 schedule
 policy: phaseqflow
 stage: train_latent
 notes: learn discrete+continuous phase/skill latent with weak supervision

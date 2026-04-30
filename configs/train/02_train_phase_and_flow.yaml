@@ -1,0 +1,27 @@
+# Stage 2 of 3: train hierarchical phase encoder + boundary-aware flow head
+# Merges the former stages 2 (phase identifiability) and 3 (flow training).
+# See master plan §6.1 for the hierarchical FSQ design rationale.
+policy: phaseqflow
+stage: train_phase_and_flow
+notes: >
+  Jointly train hierarchical phase encoder (macro K1=20, micro K2=30) and
+  shortcut flow action head with boundary-aware loss reweighting.
+  IQL verifier, A2C2 correction, and PACE-C curriculum are disabled
+  (main path; ablation via use_* flags).
+phaseqflow:
+  phase_mode: hierarchical
+  use_boundary_reweight: true
+  use_iql_verifier: false
+  use_correction_head: false
+  use_pace_c: false
+  use_chunk_infonce: true
+  use_phase_boundary_posterior: true
+  use_pace_a: true
+  use_pace_b: false
+  use_pcar: false
+  pcar_input_signal: concordance
+  boundary_reweight_lambda: 0.5
+loss_weights:
+  imit: 1.0
+  flow_policy: 0.5
+  infonce_total: 0.1   # = L_NCE_macro + 0.5 * L_NCE_micro
