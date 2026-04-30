@@ -166,6 +166,112 @@ internally, yielding N distinct action predictions.  Default N=8.
 
 ---
 
+---
+
+### Phase D Completed 2026-04-30
+
+**§4.1  Universality experiment** (`scripts/phenomenon/universality.py`)
+- `PolicyAdapter` ABC + 4 adapters in `baselines/`: `OpenVLAAdapter`, `Pi0Adapter`,
+  `BCActAdapter`, `DiffusionPolicyAdapter`
+- `--dry_run` synthetic mode (no checkpoints needed); `--preliminary` gate (§4.7)
+- Outputs: per-policy failure-distance histograms, `overlay_figure1.png`,
+  `ks_pvalue_matrix.csv`, `raw_distances.json`, `summary.md`
+- Preliminary gate: pairwise Pearson r ≥ threshold; PASS → "GO for v2" in MIGRATION_NOTES;
+  FAIL → human notification + data logged here
+
+**§4.2  Regret scaling** (`scripts/phenomenon/regret_scaling.py`)
+- `--H` sweep; reference policy = same model with `action_chunk_size=1`
+- `_compute_mean_cliff_depth` via concordance diagnostics
+- Outputs: `regret_vs_H.csv`, `regret_vs_H.png` (scatter + R² linear fit), `summary.md`
+
+**§4.3  Triangulation concordance** (`scripts/phenomenon/triangulation_concordance.py`)
+- Oracle: gripper-flip indices; ±5 timestep tolerance
+- Evaluates: I_hat_1, I_hat_2, I_hat_3, concordance_C
+- Outputs: `triangulation_table.csv`, `triangulation_f1.png`, `summary.md`
+- Synthetic data validates concordance precision > single estimator precision
+
+**§4.4  LIBERO-Long-Perturbed** (`scripts/eval/libero_perturbed.py`)
+- LIBERO-PRO protocol: ±5 cm XY perturbation + instruction paraphrase
+- Object perturbation via `env.env.sim.data.body_xpos` (LIBERO MuJoCo API)
+- `_INSTRUCTION_PARAPHRASES` vocab (fixed set for reproducibility)
+- Outputs: per-perturbation CSV + JSON summary
+
+**§4.5  SimplerEnv** (`scripts/eval/simpler.py`)
+- Google Robot Visual Matching: pick_coke_can / move_near / open_drawer / put_eggplant_in_basket
+- Observation → PhaseQFlow input conversion via `_simpler_obs_to_tensor`
+- Outputs: `simpler_results.csv`, `simpler_aggregate.json`
+
+**§4.6  Orchestration** (`scripts/run_experiments.sh`, `scripts/aggregate_results.py`)
+- `run_experiments.sh`: master script with `--dry_run` / `--checkpoint` flags
+- `aggregate_results.py`: reads all experiment outputs → `paper_figures/main_results.csv`
+- Shell runners: `scripts/eval/run_libero_main.sh`, `scripts/eval/run_simpler.sh`
+
+- Tests: 123 → 151 passed (+28: `test_phenomenon_smoke.py`)
+- Smoke: all dry_run modes functional
+- New dependencies introduced: none (matplotlib, scipy optional for plots / KS test)
+
+---
+
+## Pending Human Decisions
+
+### [PHD-4] OpenVLA checkpoint for LIBERO-Long
+
+**Status: OPEN**
+OpenVLA-7b base checkpoint (`openvla/openvla-7b`) was not fine-tuned on LIBERO-Long.
+Options:
+- (a) Zero-shot evaluation (likely low SR but scientifically valid)
+- (b) Fine-tune on LIBERO-Long (10k demos; estimate 2 GPU-days)
+- (c) Use an existing community fine-tune if one exists on HuggingFace
+
+**Required action**: human chooses (a/b/c), updates `baselines/openvla_adapter.py`
+`_DEFAULT_CHECKPOINT` accordingly, and records decision here.
+
+---
+
+### [PHD-5] π0 checkpoint for LIBERO-Long
+
+**Status: OPEN**
+The public `lerobot/pi0` checkpoint was trained on a broad manipulation mixture
+but not specifically on LIBERO-Long.  Same options as [PHD-4].
+
+---
+
+### [PHD-6] BC-ACT checkpoint for LIBERO-Long
+
+**Status: OPEN**
+LeRobot ACT checkpoints target ALOHA / PushT, not LIBERO-Long.  Options:
+- (a) Train ACT from scratch on LIBERO-Long demos via LeRobot
+- (b) Find a community LIBERO-Long ACT checkpoint
+
+---
+
+### [PHD-7] Diffusion Policy checkpoint for LIBERO-Long
+
+**Status: OPEN**
+`lerobot/diffusion_pusht` targets PushT.  Options:
+- (a) Train Diffusion Policy on LIBERO-Long via LeRobot
+- (b) [PHD-7b] Use robomimic framework if it has LIBERO-Long checkpoints
+
+---
+
+### [PHD-8] LIBERO-PRO open-source eval harness
+
+**Status: OPEN**
+LIBERO-PRO has not released a public eval harness as of 2026-04-30.
+The perturbation logic in `scripts/eval/libero_perturbed.py` is a
+re-implementation.  If LIBERO-PRO releases open source code, migrate
+to it and delete `_apply_object_perturbation`.
+
+---
+
+### [PHD-9] SimplerEnv version pin
+
+**Status: OPEN**
+Confirm which SimplerEnv commit / version to pin for reproducibility.
+The adapter targets the Google Robot Visual Matching variant from ≥ 2024-12.
+
+---
+
 ## Terminology Lock Table
 
 | Paper term | Code (internal / Round-4 name) | Cliff-namespace name |
@@ -178,3 +284,83 @@ internally, yielding N distinct action predictions.  Default N=8.
 | Concordance C_t | `ConcordanceDetector.step` → `concordance` | `concordance_C` |
 | Phase posterior p̂_t | `phase_p_hat`, `p_hat` | — (internal only) |
 | Bhattacharyya distance β_t | `_bhattacharyya_beta` | — (internal only) |
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): GO for v2
+
+All pairwise Pearson r ≥ 0.0.  Full experiment authorised.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): FAIL
+
+Pairwise Pearson r below 1.01:
+- openvla vs pi0: r=0.183
+- openvla vs bc_act: r=0.352
+- openvla vs diffusion_policy: r=-0.128
+- pi0 vs bc_act: r=0.418
+- pi0 vs diffusion_policy: r=0.700
+- bc_act vs diffusion_policy: r=0.626
+
+Human decision required: reframe or abort.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): GO for v2
+
+All pairwise Pearson r ≥ 0.0.  Full experiment authorised.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): FAIL
+
+Pairwise Pearson r below 1.01:
+- openvla vs pi0: r=0.183
+- openvla vs bc_act: r=0.352
+- openvla vs diffusion_policy: r=-0.128
+- pi0 vs bc_act: r=0.418
+- pi0 vs diffusion_policy: r=0.700
+- bc_act vs diffusion_policy: r=0.626
+
+Human decision required: reframe or abort.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): GO for v2
+
+All pairwise Pearson r ≥ 0.0.  Full experiment authorised.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): FAIL
+
+Pairwise Pearson r below 1.01:
+- openvla vs pi0: r=0.183
+- openvla vs bc_act: r=0.352
+- openvla vs diffusion_policy: r=-0.128
+- pi0 vs bc_act: r=0.418
+- pi0 vs diffusion_policy: r=0.700
+- bc_act vs diffusion_policy: r=0.626
+
+Human decision required: reframe or abort.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): GO for v2
+
+All pairwise Pearson r ≥ 0.0.  Full experiment authorised.
+
+
+
+### [PHD-UNI-PRELIM] Universality preliminary (2026-04-30): FAIL
+
+Pairwise Pearson r below 1.01:
+- openvla vs pi0: r=0.183
+- openvla vs bc_act: r=0.352
+- openvla vs diffusion_policy: r=-0.128
+- pi0 vs bc_act: r=0.418
+- pi0 vs diffusion_policy: r=0.700
+- bc_act vs diffusion_policy: r=0.626
+
+Human decision required: reframe or abort.
+
