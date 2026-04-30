@@ -57,6 +57,7 @@ def _build_histogram(distances_raw: List[int], n_bins: int = 20, max_dist: int =
 
 
 def make_figure(raw_distances: Dict[str, List[int]], output_path: Path) -> None:
+    """Render failure-distance density curves for each policy and save to PDF."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -89,6 +90,7 @@ def make_figure(raw_distances: Dict[str, List[int]], output_path: Path) -> None:
 
 
 def main(argv=None) -> int:
+    """CLI entry point: load raw_distances.json (or synthesise) then call make_figure."""
     p = argparse.ArgumentParser()
     p.add_argument("--input", type=Path, default=Path("paper_figures/universality/raw_distances.json"))
     p.add_argument("--output", type=Path, default=Path("paper_figures/fig1_universality.pdf"))

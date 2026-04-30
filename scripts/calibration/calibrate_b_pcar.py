@@ -101,6 +101,7 @@ def _sweep_b_pcar(
 
 
 def main() -> None:
+    """CLI entry point: sweep (budget, alpha) pairs and report replan-rate alignment."""
     parser = argparse.ArgumentParser(description="Calibrate BayesianPCARTrigger")
     parser.add_argument("--rollout_dir", default=None,
                         help="Directory of rollout JSON files with concordance signals")

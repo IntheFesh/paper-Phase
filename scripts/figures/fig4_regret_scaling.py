@@ -53,6 +53,7 @@ def _synthetic_data() -> List[Dict]:
 
 
 def make_figure(rows: List[Dict], output_path: Path) -> None:
+    """Render two-panel regret scaling: (a) δSR vs H and (b) δSR vs H·ΔH with OLS fit."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -124,6 +125,7 @@ def make_figure(rows: List[Dict], output_path: Path) -> None:
 
 
 def main(argv=None) -> int:
+    """CLI entry point: load regret_vs_H.csv (or synthesise) then call make_figure."""
     p = argparse.ArgumentParser()
     p.add_argument("--input", type=Path, default=Path("paper_figures/regret_scaling/regret_vs_H.csv"))
     p.add_argument("--output", type=Path, default=Path("paper_figures/fig4_regret_scaling.pdf"))

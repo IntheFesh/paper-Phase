@@ -95,6 +95,7 @@ def _synthetic_episode(T: int = 150, K_macro: int = 20, K_micro: int = 30,
 
 
 def make_figure(episodes: List[Dict], output_path: Path) -> None:
+    """Render 4-row phase visualization (z_macro, z_micro, I^(1/2/3), C_t + replan) per episode."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -163,6 +164,7 @@ def make_figure(episodes: List[Dict], output_path: Path) -> None:
 
 
 def main(argv=None) -> int:
+    """CLI entry point: generate or load episode data then call make_figure."""
     p = argparse.ArgumentParser()
     p.add_argument("--dry_run", action="store_true")
     p.add_argument("--input", type=Path, default=None)

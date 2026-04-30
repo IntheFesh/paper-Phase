@@ -199,6 +199,7 @@ def _synthetic_pr_data(
 
 
 def make_figure(pr_data: Dict[str, Tuple[np.ndarray, np.ndarray]], output_path: Path) -> None:
+    """Render full P/R curves for all 6 cliff detectors; concordance is highlighted."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -234,6 +235,7 @@ def make_figure(pr_data: Dict[str, Tuple[np.ndarray, np.ndarray]], output_path: 
 
 
 def main(argv=None) -> int:
+    """CLI entry point: generate synthetic PR data then call make_figure."""
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, default=Path("paper_figures/fig5_concordance_pr_curve.pdf"))
     p.add_argument("--n_episodes", type=int, default=50)

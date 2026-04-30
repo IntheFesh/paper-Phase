@@ -148,7 +148,11 @@ class ChunkInfoNCEHead(nn.Module):
         fused_obs: torch.Tensor,
         action_chunk: torch.Tensor,
     ) -> torch.Tensor:
-        """Encode (fused_obs, action_chunk) into a normalized context vector."""
+        """Encode (fused_obs, action_chunk) into a unit-norm context vector for the InfoNCE critic.
+
+        Pads or trims ``action_chunk`` to exactly ``(B, Ta, Da)`` so the encoder
+        weight shape is fixed regardless of the dataloader's chunk length.
+        """
         B = fused_obs.shape[0]
         device = fused_obs.device
         Ta_in = action_chunk.shape[1]
@@ -180,7 +184,12 @@ class ChunkInfoNCEHead(nn.Module):
         embed_table: nn.Embedding,
         K: int,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Core InfoNCE computation for a single level (macro or micro)."""
+        """Core InfoNCE loss for one codebook level (macro or micro).
+
+        Same-phase off-diagonal pairs are masked out of the denominator so they
+        cannot act as spurious negatives — without this mask, two rows that share
+        a phase id would push each other's embeddings apart, collapsing the code.
+        """
         B = ctx.shape[0]
         device = ctx.device
         zero = torch.zeros((), device=device, dtype=ctx.dtype)

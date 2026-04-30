@@ -266,6 +266,7 @@ def _parse_args(argv=None):
 
 
 def main(argv=None) -> int:
+    """CLI entry point: run SimplerEnv evaluation across 4 tasks (dry_run uses synthetic rollouts)."""
     args = _parse_args(argv)
     rng = np.random.default_rng(42)
 

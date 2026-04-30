@@ -30,7 +30,12 @@ import torch.nn.functional as F
 
 
 def _align_beta(beta_t: torch.Tensor, B: int, Ta: int) -> torch.Tensor:
-    """Broadcast ``beta_t`` to shape ``(B, Ta)``."""
+    """Broadcast ``beta_t`` to shape ``(B, Ta)``, handling all three legal input shapes.
+
+    Callers pass beta from different sources (posterior step → ``(B,)``, sequence
+    unroll → ``(B, Ta)`` or ``(B, Ta, 1)``); this normalises them so the
+    per-step weighting arithmetic is always shape-safe.
+    """
     if beta_t.ndim == 1:
         if beta_t.shape[0] != B:
             raise ValueError(f"beta_t (B,) has B={beta_t.shape[0]} != {B}")
@@ -121,7 +126,12 @@ def boundary_aware_reweight(
     beta_t: torch.Tensor,
     lambda_weight: float = 0.5,
 ) -> torch.Tensor:
-    """Functional helper: boundary-aware weighted MSE scalar."""
+    """Return the scalar boundary-aware FM loss without the diagnostic side-outputs.
+
+    Thin convenience wrapper over :func:`compute_boundary_aware_flow_loss` for
+    callers (e.g. ablation scripts) that only need the loss scalar and not the
+    per-step breakdown.
+    """
     out = compute_boundary_aware_flow_loss(
         v_pred=v_pred,
         v_target=v_target,
