@@ -126,25 +126,99 @@ def test_I_hat_1_differentiable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I_hat_2 / I_hat_3 / concordance_C are NotImplementedError stubs
+# I_hat_2 unit tests (action variance)
 # ---------------------------------------------------------------------------
 
-def test_I_hat_2_raises_not_implemented() -> None:
-    """compute_I_hat_2 raises NotImplementedError until PHD-1 is resolved."""
-    with pytest.raises(NotImplementedError):
-        compute_I_hat_2()
+def test_I_hat_2_shape_and_sign() -> None:
+    """compute_I_hat_2 returns shape (B,) with non-positive values."""
+    samples = torch.randn(8, 4, 16, 7)  # N=8, B=4, Ta=16, Da=7
+    out = compute_I_hat_2(samples)
+    assert out.shape == (4,)
+    assert torch.all(out <= 0.0 + 1e-6)
 
 
-def test_I_hat_3_raises_not_implemented() -> None:
-    """compute_I_hat_3 raises NotImplementedError until PHD-2 is resolved."""
-    with pytest.raises(NotImplementedError):
-        compute_I_hat_3()
+def test_I_hat_2_zero_variance() -> None:
+    """Identical action samples produce I_hat_2 == 0."""
+    a = torch.randn(1, 3, 8, 5)
+    samples = a.expand(6, -1, -1, -1).contiguous()  # N=6 identical copies
+    out = compute_I_hat_2(samples)
+    assert torch.allclose(out, torch.zeros(3), atol=1e-6)
 
 
-def test_concordance_C_raises_not_implemented() -> None:
-    """compute_concordance_C raises NotImplementedError until all estimators are ready."""
-    with pytest.raises(NotImplementedError):
-        compute_concordance_C([torch.zeros(4)])
+def test_I_hat_2_high_variance_more_negative() -> None:
+    """Higher action sample spread produces a more negative I_hat_2."""
+    low = torch.randn(8, 2, 4, 4) * 0.1
+    high = torch.randn(8, 2, 4, 4) * 1.0
+    assert compute_I_hat_2(low).mean() > compute_I_hat_2(high).mean()
+
+
+def test_I_hat_2_rejects_low_N() -> None:
+    """compute_I_hat_2 requires N≥2 samples; raises ValueError otherwise."""
+    with pytest.raises(ValueError):
+        compute_I_hat_2(torch.randn(1, 2, 4, 4))
+
+
+# ---------------------------------------------------------------------------
+# I_hat_3 unit tests (velocity curvature)
+# ---------------------------------------------------------------------------
+
+def test_I_hat_3_shape_and_sign() -> None:
+    """compute_I_hat_3 returns shape (B,) with non-positive values."""
+    v_t = torch.randn(3, 16, 7)
+    v_prev = torch.randn(3, 16, 7)
+    out = compute_I_hat_3(v_t, v_prev)
+    assert out.shape == (3,)
+    assert torch.all(out <= 0.0 + 1e-6)
+
+
+def test_I_hat_3_zero_when_identical() -> None:
+    """Identical velocities produce I_hat_3 == 0."""
+    v = torch.randn(2, 8, 4)
+    out = compute_I_hat_3(v, v.clone())
+    assert torch.allclose(out, torch.zeros(2), atol=1e-6)
+
+
+def test_I_hat_3_rejects_shape_mismatch() -> None:
+    """compute_I_hat_3 raises ValueError when shapes don't match."""
+    with pytest.raises(ValueError):
+        compute_I_hat_3(torch.randn(2, 4, 4), torch.randn(3, 4, 4))
+
+
+# ---------------------------------------------------------------------------
+# Concordance C_t unit tests
+# ---------------------------------------------------------------------------
+
+def test_concordance_C_in_unit_interval() -> None:
+    """compute_concordance_C returns values in [0, 1]."""
+    i_hats = [torch.randn(4) for _ in range(3)]
+    out = compute_concordance_C(i_hats, window_size=10)
+    assert out.shape == (4,)
+    assert torch.all(out >= 0.0)
+    assert torch.all(out <= 1.0)
+
+
+def test_concordance_C_stateful_window() -> None:
+    """compute_concordance_C with persistent _state honors the rolling window."""
+    state: dict = {}
+    for _ in range(20):
+        i_hats = [torch.randn(2) for _ in range(3)]
+        out = compute_concordance_C(i_hats, window_size=5, _state=state)
+        assert out.shape == (2,)
+        assert torch.all(out >= 0.0) and torch.all(out <= 1.0)
+
+
+def test_concordance_C_rejects_empty() -> None:
+    """compute_concordance_C raises ValueError on empty input."""
+    with pytest.raises(ValueError):
+        compute_concordance_C([], window_size=10)
+
+
+def test_concordance_C_rejects_shape_mismatch() -> None:
+    """compute_concordance_C raises ValueError when batch sizes differ."""
+    with pytest.raises(ValueError):
+        compute_concordance_C(
+            [torch.randn(4), torch.randn(5)], window_size=10
+        )
 
 
 # ---------------------------------------------------------------------------
