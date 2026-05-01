@@ -57,15 +57,16 @@ sub()   { printf "${CYAN}--- %s${RESET}\n" "$*"; }
 : "${HF_HOME:=/root/autodl-tmp/hf_cache}"
 : "${DATA_ROOT:=${PACE_DATA}/libero_10}"
 : "${DATASET_REPO_ID:=HuggingFaceVLA/libero}"
-# Conservative safe defaults; autobatch will normally override with the
-# largest size that fits the actual GPU at runtime.
-: "${BATCH_SIZE:=32}"
-: "${GRAD_ACCUM:=32}"
+# Starting batch size (256 confirmed safe on H800/A100 24GB; autobatch will
+# probe downwards if OOM occurs).  GRAD_ACCUM adjusts so effective batch ≈ 256.
+: "${BATCH_SIZE:=256}"
+: "${GRAD_ACCUM:=1}"
 
 export PACE_ROOT PACE_DATA PACE_CKPT PACE_OUT PACE_SNAPSHOT_DIR
 export HF_HOME DATA_ROOT DATASET_REPO_ID BATCH_SIZE GRAD_ACCUM
 
-CLOUD_SCRIPT="configs/cloud/phaseqflow_cloud_accelerate.sh"
+# CoRL sweep script (13 runs: base_fm×3, pace_concordance×3, pace_concordance_bdy×3, ablations×4)
+CLOUD_SCRIPT="configs/cloud/phaseqflow_cloud_corl.sh"
 export CLOUD_SCRIPT
 
 # Help / usage path — print and exit before touching dirs (so --help works anywhere).
@@ -297,9 +298,9 @@ phase_4b_autobatch() {
     return 0
   fi
 
-  # Extra candidates can be appended via AUTOBATCH_CANDIDATES (whitespace-separated).
-  local candidates="${AUTOBATCH_CANDIDATES:-128 96 64 48 32 24 16 12 8 6 4}"
-  local target="${AUTOBATCH_TARGET_EFFECTIVE:-1024}"
+  # Start from 256 (confirmed safe on H800/A100); probe downward on OOM.
+  local candidates="${AUTOBATCH_CANDIDATES:-256 192 128 96 64 48 32 24 16}"
+  local target="${AUTOBATCH_TARGET_EFFECTIVE:-256}"
   local safety="${AUTOBATCH_SAFETY:-0.90}"
 
   python scripts/tune_batch_size.py \
