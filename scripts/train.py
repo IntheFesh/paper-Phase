@@ -39,7 +39,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PKG_SRC = _REPO_ROOT / "lerobot_policy_phaseqflow" / "src"
@@ -163,16 +163,71 @@ def _run_smoke_stage(stage_cfg: Dict[str, Any], device: str, steps: int = 3) -> 
     log.info("[smoke] stage=%s DONE (%.2fs, %d steps)", stage_name, elapsed, steps)
 
 
+_STAGE_TO_MODE = {
+    "01_pretrain_multimodal": "off",
+    "02_train_phase_and_flow": "a",
+    "03_finetune_replan": "pcar",
+}
+
+
+def _delegate_to_trainer(
+    stage_cfg: Dict[str, Any],
+    *,
+    data_root: str,
+    max_steps: int,
+    device: str,
+    seed: int,
+    output_dir: str,
+    micro_batch: int,
+    resume_from_checkpoint: Optional[str],
+    extra_args: list,
+) -> int:
+    """Forward to scripts/training/train_dummy_batch.py with stage-derived flags."""
+    import subprocess
+
+    stage_name = stage_cfg.get("stage", "")
+    mode = _STAGE_TO_MODE.get(stage_name, "off")
+
+    cmd = [
+        sys.executable,
+        str(_REPO_ROOT / "scripts" / "training" / "train_dummy_batch.py"),
+        "--phase-centric-mode", mode,
+        "--steps", str(max_steps),
+        "--device", device,
+        "--seed", str(seed),
+        "--output_dir", output_dir,
+        "--micro-batch", str(micro_batch),
+        "--data_root", data_root,
+        "--enable_diagnostics",
+        "--enable_checkpointing",
+    ]
+    if resume_from_checkpoint:
+        cmd += ["--resume_from_checkpoint", resume_from_checkpoint]
+    cmd += list(extra_args)
+
+    log.info("delegating to: %s", " ".join(cmd))
+    return subprocess.call(cmd)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PACE v2 stage-based trainer")
     parser.add_argument("--stage", required=True, help="Path to stage YAML config")
-    parser.add_argument("--epochs", type=int, default=1, help="Number of epochs")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of epochs (smoke only)")
     parser.add_argument("--device", default="cpu", help="Training device")
     parser.add_argument("--smoke_mode", action="store_true",
                         help="Run 3-step smoke check and exit")
     parser.add_argument("--steps", type=int, default=3,
                         help="Steps per epoch (smoke mode only)")
-    args = parser.parse_args()
+    parser.add_argument("--data_root", type=str, default=None,
+                        help="LeRobotDataset path or HuggingFace repo-id")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Total training steps (full mode)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Where artifacts (checkpoints, eval, diagnostics) land")
+    parser.add_argument("--micro_batch", type=int, default=32)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    args, extra = parser.parse_known_args()
 
     stage_cfg = _load_stage_cfg(args.stage)
     stage_name = stage_cfg.get("stage", Path(args.stage).stem)
@@ -183,7 +238,6 @@ def main() -> None:
         print(f" [OK] stage={stage_name}")
         return
 
-    # Full training path (delegates to lerobot-train or dummy batch)
     if _is_calibration_only(stage_cfg):
         log.info("calibration_only=True — running calibration scripts")
         calibrate_list = stage_cfg.get("calibrate", [])
@@ -192,12 +246,25 @@ def main() -> None:
         log.info("Calibration stage complete.")
         return
 
-    log.info(
-        "Full training for %d epochs not yet wired to a real dataloader. "
-        "Use --smoke_mode for a local sanity check, or call lerobot-train "
-        "with --policy.type phaseqflow for GPU training.",
-        args.epochs,
+    if args.data_root is None or args.max_steps is None or args.output_dir is None:
+        log.error(
+            "Full training requires --data_root, --max_steps, and --output_dir. "
+            "Use --smoke_mode for a quick CPU sanity check."
+        )
+        sys.exit(2)
+
+    rc = _delegate_to_trainer(
+        stage_cfg,
+        data_root=args.data_root,
+        max_steps=int(args.max_steps),
+        device=args.device,
+        seed=int(args.seed),
+        output_dir=args.output_dir,
+        micro_batch=int(args.micro_batch),
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        extra_args=extra,
     )
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

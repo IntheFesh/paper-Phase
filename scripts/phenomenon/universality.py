@@ -418,6 +418,8 @@ def _parse_args(argv=None):
                        "Full four-policy run requires ~220GB of baseline checkpoints."
                    ))
     p.add_argument("--output", type=Path, default=Path("paper_figures/universality"))
+    p.add_argument("--libero_task", type=str, default="libero_long",
+                   help="LIBERO suite to evaluate (used only when --dry_run is off).")
     p.add_argument("--pearson_threshold", type=float, default=0.6,
                    help="Min pairwise Pearson r for preliminary PASS")
     return p.parse_args(argv)
@@ -436,6 +438,14 @@ def main(argv=None) -> int:
     rng = np.random.default_rng(_RNG_SEED_BASE)
     adapters = _build_adapters(args.policies, dry_run=args.dry_run)
 
+    # Build a real env_factory when not in dry_run; fall back per-policy when missing.
+    env_factory = None
+    if not args.dry_run and adapters:
+        from scripts.phenomenon._env_factory import build_libero_env_factory
+        env_factory = build_libero_env_factory(task=args.libero_task)
+        if env_factory is None:
+            print("[universality] WARNING: LIBERO env unavailable; per-policy dry_run fallback")
+
     # Collect failure distances per policy
     distances_by_policy: Dict[str, List[Optional[int]]] = {}
     for name in args.policies:
@@ -444,11 +454,11 @@ def main(argv=None) -> int:
         dists = _run_policy(
             name=name,
             adapter=adapter,
-            env_factory=None,  # real env factory injected when adapter is real
+            env_factory=env_factory,
             n_rollouts=args.n_rollouts,
             seeds=args.seeds,
             n_steps=args.n_steps,
-            dry_run=(args.dry_run or adapter is None),
+            dry_run=(args.dry_run or adapter is None or env_factory is None),
             rng=rng,
         )
         distances_by_policy[name] = dists

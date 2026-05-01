@@ -260,6 +260,8 @@ def _parse_args(argv=None):
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--dry_run", action="store_true",
                    help="Use synthetic data (no checkpoint or env needed)")
+    p.add_argument("--libero_task", type=str, default="libero_long",
+                   help="LIBERO suite to evaluate when --checkpoint is provided.")
     p.add_argument("--output", type=Path, default=Path("paper_figures/regret_scaling"))
     return p.parse_args(argv)
 
@@ -281,8 +283,16 @@ def main(argv=None) -> int:
             print(f"  H={H:3d}  SR={rec['SR']:.3f}  SR_ref={rec['SR_ref']:.3f}  "
                   f"δSR={rec['delta_SR']:.3f}  ΔH={rec['mean_delta_H']:.3f}")
     else:
-        # Real evaluation
-        env_factory = None  # caller must supply; placeholder
+        # Real evaluation — try to construct a LIBERO env_factory; fall back to dry_run.
+        from scripts.phenomenon._env_factory import build_libero_env_factory
+        env_factory = build_libero_env_factory(task=getattr(args, "libero_task", "libero_long"))
+        if env_factory is None:
+            print("[regret_scaling] WARNING: LIBERO env unavailable; falling back to dry_run")
+            for H in sorted(args.H):
+                rec = _synthetic_regret(H, rng)
+                records.append(rec)
+            _write_summary(records, output_dir, dry_run=True)
+            return 0
         print("[regret_scaling] Loading reference policy (H=1) ...")
         ref_policy = _load_policy(args.checkpoint, chunk_size=1, device=args.device)
         SR_ref = _evaluate_policy(ref_policy, env_factory, args.n_rollouts, args.seeds)
