@@ -30,6 +30,7 @@ SEEDS=(42)  # single seed locally to keep the run short
 
 # ------------------------------------------------------------------ training defaults
 DATASET_REPO_ID="${DATASET_REPO_ID:-HuggingFaceVLA/smol-libero}"
+DATA_ROOT="${DATA_ROOT:-${PACE_DATA}/smol_libero}"
 DEVICE="${DEVICE:-cuda}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 STAGE1_STEPS="${STAGE1_STEPS:-200}"
@@ -61,6 +62,7 @@ run_experiment() {
       --diagnostic_log_every "$DIAG_EVERY" \
       --checkpoint_save_every "$CKPT_EVERY" \
       --checkpoint_keep_last "$KEEP_LAST" \
+      --data_root "$DATA_ROOT" \
       "$@" 2>&1 | tee "$log_file"
   python scripts/utils/snapshot_experiment.py \
       --src "$exp_dir" \

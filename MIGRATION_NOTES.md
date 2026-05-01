@@ -12,13 +12,19 @@
 | §6.2 Regret Scaling | ✅ Real data |
 | §6.5 Boundary Loss Ratio | ✅ Real data |
 
-### Disabled (NotImplementedError)
-| Config | Blocker | Target |
-|--------|---------|--------|
-| Ablation 03: Cliff via σ² (I^2) | `compute_I_hat_2` | v2.1 |
-| Ablation 04: Cliff via κ (I^3) | `compute_I_hat_3` | v2.1 |
-| Ablation 05: Concordance C_t | needs I^2 + I^3 | v2.1 |
-| §6.3 Triangulation (real data) | concordance incomplete | v2.1 |
+### Now implemented (v2.1)
+| Config | Implementation | Status |
+|--------|---------------|--------|
+| Ablation 03: Cliff via σ² (I^2) | `compute_I_hat_2` | ✅ Implemented |
+| Ablation 04: Cliff via κ (I^3) | `compute_I_hat_3` | ✅ Implemented |
+| Ablation 05: Concordance C_t | `compute_concordance_C` | ✅ Implemented |
+| §6.3 Triangulation (real data) | concordance complete | ✅ Unblocked |
+
+All three estimators are wired into `PhaseQFlowPolicy.forward()`:
+- `I_hat_1` always present when `phase_beta` is available.
+- `I_hat_3` computed from consecutive `v_θ(anchor, c_t)` vs cached `c_{t-1}`; cached in `_v_theta_prev`, cleared by `policy.reset()`.
+- `I_hat_2` computed when BID sampler produces N≥2 action samples (`bid_chunks` in preds).
+- `concordance_C` fuses all available estimators per step via rolling rank windows (`_concordance_state`, also cleared by `reset()`).
 
 ### Dry-run only (pipeline validated, numbers synthetic)
 | Experiment | Reason |
