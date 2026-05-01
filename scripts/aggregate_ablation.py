@@ -34,12 +34,41 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+
+
+def _env_skip_set() -> Set[str]:
+    """Parse ``$PACE_SKIP_ABLATIONS`` (comma-separated) into a set."""
+    raw = os.environ.get("PACE_SKIP_ABLATIONS", "")
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def _env_dryrun_set() -> Set[str]:
+    """Parse ``$PACE_DRYRUN_ABLATIONS`` (comma-separated) into a set."""
+    raw = os.environ.get("PACE_DRYRUN_ABLATIONS", "")
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def _default_input_root() -> Path:
+    """Resolve the default input root from ``$PACE_RUN_DIR`` if set."""
+    run_dir = os.environ.get("PACE_RUN_DIR")
+    if run_dir:
+        return Path(run_dir) / "ablation"
+    return Path("outputs/ablation_v2")
+
+
+def _default_output_dir() -> Path:
+    """Resolve the default output dir from ``$PACE_RUN_DIR`` if set."""
+    run_dir = os.environ.get("PACE_RUN_DIR")
+    if run_dir:
+        return Path(run_dir) / "aggregated"
+    return Path("paper_figures/ablation_v2")
 
 # ---------------------------------------------------------------------------
 # IQM + bootstrap (rliable or numpy fallback)
@@ -300,11 +329,35 @@ def _write_latex(rows: List[Dict], output_path: Path) -> None:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dry_run", action="store_true")
-    p.add_argument("--input_root", type=Path, default=Path("outputs/ablation_v2"))
-    p.add_argument("--output", type=Path, default=Path("paper_figures/ablation_v2"))
+    p.add_argument(
+        "--input_root",
+        type=Path,
+        default=None,
+        help="Directory holding per-method subdirs. Defaults to "
+             "$PACE_RUN_DIR/ablation if PACE_RUN_DIR is set, else outputs/ablation_v2.",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output directory for tables/CSV. Defaults to "
+             "$PACE_RUN_DIR/aggregated if PACE_RUN_DIR is set, else paper_figures/ablation_v2.",
+    )
     p.add_argument("--n_bootstrap", type=int, default=2000)
     p.add_argument("--n_seeds", type=int, default=3, help="Seeds per method (synthetic only)")
     args = p.parse_args(argv)
+
+    if args.input_root is None:
+        args.input_root = _default_input_root()
+    if args.output is None:
+        args.output = _default_output_dir()
+
+    skip_methods = _env_skip_set()
+    dryrun_methods = _env_dryrun_set()
+    if skip_methods:
+        print(f"[aggregate_ablation] PACE_SKIP_ABLATIONS = {sorted(skip_methods)}")
+    if dryrun_methods:
+        print(f"[aggregate_ablation] PACE_DRYRUN_ABLATIONS = {sorted(dryrun_methods)}")
 
     args.output.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)
@@ -320,17 +373,25 @@ def main(argv=None) -> int:
 
     rows: List[Dict] = []
     for method in _METHODS:
+        if method in skip_methods:
+            print(f"[aggregate_ablation] [SKIP] {method} (PACE_SKIP_ABLATIONS)")
+            continue
         for bm in _BENCHMARKS:
             scores = results.get(method, {}).get(bm, np.array([]))
             base_scores = baseline.get(bm, np.array([]))
             if len(scores) == 0:
                 continue
             stats = _compute_stats(scores, base_scores, n_bootstrap=args.n_bootstrap, rng=rng)
-            rows.append({"method": method, "benchmark": bm, **stats})
+            note = ""
+            if method in dryrun_methods:
+                note = "dry_run"
+            elif method in _PENDING_METHODS:
+                note = "pending"
+            rows.append({"method": method, "benchmark": bm, **stats, "note": note})
 
     # Save CSV
     csv_path = args.output / "ablation_table_v2.csv"
-    fieldnames = ["method", "benchmark", "IQM", "CI_lower", "CI_upper", "wilcoxon_p", "cohens_d"]
+    fieldnames = ["method", "benchmark", "IQM", "CI_lower", "CI_upper", "wilcoxon_p", "cohens_d", "note"]
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
