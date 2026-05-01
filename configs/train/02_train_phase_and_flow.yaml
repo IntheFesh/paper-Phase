@@ -1,6 +1,6 @@
 # Stage 2 of 3: train hierarchical phase encoder + boundary-aware flow head
-# Merges the former stages 2 (phase identifiability) and 3 (flow training).
-# See master plan §6.1 for the hierarchical FSQ design rationale.
+# Jointly trains phase encoder and shortcut flow action head.
+# Target: 50 epochs on LIBERO-10 (≈333k steps at batch=256).
 policy: phaseqflow
 stage: train_phase_and_flow
 notes: >
@@ -8,6 +8,7 @@ notes: >
   shortcut flow action head with boundary-aware loss reweighting.
   IQL verifier, A2C2 correction, and PACE-C curriculum are disabled
   (main path; ablation via use_* flags).
+
 phaseqflow:
   phase_mode: hierarchical
   use_boundary_reweight: true
@@ -21,7 +22,35 @@ phaseqflow:
   use_pcar: false
   pcar_input_signal: concordance
   boundary_reweight_lambda: 0.5
+
 loss_weights:
-  imit: 1.0
-  flow_policy: 0.5
-  infonce_total: 0.1   # = L_NCE_macro + 0.5 * L_NCE_micro
+  imit: 1.0                   # L_imit: imitation / BC loss
+  flow_policy: 0.5            # L_policy: flow-matching policy loss
+  infonce_total: 0.1          # L_InfoNCE: L_NCE_macro + 0.5 * L_NCE_micro
+
+optimizer:
+  planner:
+    type: PagedAdamW8bit
+    lr: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  flow_head:
+    type: PagedAdamW8bit
+    lr: 5.0e-5
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+
+scheduler:
+  type: cosine_with_warmup
+  warmup_steps: 1000          # 5% warmup of ~333k steps ≈ 16.7k → round to 1000
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.05
+
+training:
+  epochs: 50
+  batch_size: 256             # override with BATCH_SIZE env var or autobatch
+  mixed_precision: bf16
+  grad_clip: 1.0
+  grad_accum: 1

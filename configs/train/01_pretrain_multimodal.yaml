@@ -1,13 +1,21 @@
 # Stage 1 of 3: pretrain multimodal tokenizer + cross-attention
-# No phase-centric features; trains vision/language/state tokenization.
+# LoRA-only on vision+language encoders; all phase-centric features disabled.
+# Target: 30 epochs on LIBERO-10 (≈200k steps at batch=256).
 policy: phaseqflow
 stage: pretrain_multimodal
 notes: >
-  Train vision tokenizer and cross-attention backbone with frozen vision
-  backbone.  Phase-centric innovations are all disabled.
+  Train vision tokenizer and cross-attention backbone.
+  Only vision LoRA + language LoRA adapters are updated; backbone weights frozen.
+  Phase-centric innovations are all disabled in this stage.
+
 phaseqflow:
   freeze_vision_encoder: true
   use_vision_adapter: true
+  use_lora_vision: true
+  use_lora_language: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
   weak_phase_supervision_mode: latent
   use_value_guided_weight: false
   flow_steps: 1
@@ -18,7 +26,27 @@ phaseqflow:
   use_pace_b: false
   use_pace_c: false
   use_pcar: false
+
 losses:
   vision_state_contrastive: 1.0
   masked_modeling: 0.5
   future_token_prediction: 0.5
+
+optimizer:
+  type: PagedAdamW8bit        # bitsandbytes paged optimizer; falls back to AdamW
+  lr: 2.0e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: cosine_with_warmup
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+
+training:
+  epochs: 30
+  batch_size: 256             # override with BATCH_SIZE env var or autobatch
+  mixed_precision: bf16
+  grad_clip: 1.0
+  grad_accum: 1               # increase if batch_size reduced by autobatch

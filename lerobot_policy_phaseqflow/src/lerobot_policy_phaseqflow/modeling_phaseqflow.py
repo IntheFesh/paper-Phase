@@ -2152,6 +2152,8 @@ class PhaseQFlowPolicy(nn.Module):
             self._bid_sampler.reset()
         if self.phase_posterior is not None:
             self.phase_posterior.reset(batch_size=1)
+        self._v_theta_prev = None
+        self._concordance_state = {}
         if self.pace_b_flow_head is not None and hasattr(self.pace_b_flow_head, "reset_switching"):
             self.pace_b_flow_head.reset_switching(batch_size=1)
         if self._pcar_trigger is not None:

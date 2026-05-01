@@ -27,9 +27,9 @@
 - [§3 Cliff Estimators, Concordance, and PCAR](#3-cliff-estimators-concordance-and-pcar)
   - [3.1 Phase InfoNCE (implemented)](#31-phase-identifiability--chunk-level-infonce)
   - [3.2 I^(1) Bhattacharyya β_t (implemented)](#32-hati1--bhattacharyya-boundary-signal-betat-implemented)
-  - [3.3 I^(2) Action variance (pending)](#33-hati2--action-ensemble-variance-sigma_t2-pending)
-  - [3.4 I^(3) Velocity curvature (pending)](#34-hati3--velocity-field-curvature-kappa_t-pending)
-  - [3.5 Concordance C_t (pending)](#35-concordance-c_t-pending)
+  - [3.3 I^(2) Action variance (implemented)](#33-hati2--action-ensemble-variance-sigma_t2)
+  - [3.4 I^(3) Velocity curvature (implemented)](#34-hati3--velocity-field-curvature-kappa_t)
+  - [3.5 Concordance C_t (implemented)](#35-concordance-c_t)
   - [3.6 PCAR](#36-pcar--predictability-cliff-adaptive-replanning)
   - [3.7 Boundary-aware flow loss](#37-boundary-aware-flow-loss-pace-a)
   - [3.8 Summary table](#38-summary)
@@ -667,13 +667,13 @@ Tests: `test_I_hat_2_shape_and_sign`, `test_I_hat_2_zero_variance`,
 **Definition**:
 $\hat I^{(3)}(t) =
 -\|v_\theta(x_\tau, \tau, c_t) - v_\theta(x_\tau, \tau, c_{t-1})\|_2^2$,
-where $x_\tau$ is a fixed anchor noise sample and $c_t, c_{t-1}$
-are consecutive condition vectors.
+where $x_\tau = 0$ (fixed zero anchor) and $\tau = 0.5$,
+and $c_t, c_{t-1}$ are consecutive condition vectors.
 
 **Rationale**: if the policy's velocity field is continuous at
 interior steps but jumps at boundaries (because $c_t$ encodes a
 different phase), then the $L^2$ difference between the velocity
-field at a fixed anchor point detects the transition without
+field at the fixed anchor detects the transition without
 requiring an ensemble.
 
 **Implementation**: `PhaseQFlowPolicy.forward()` evaluates the flow
@@ -684,7 +684,7 @@ by `policy.reset()`). The cliff signal appears as `preds["I_hat_3"]`
 from the second step onward.
 
 ```python
-# phase_centric/cliff_estimators.py
+# phase_centric/cliff_estimators.py  — IMPLEMENTED
 def compute_I_hat_3(
     v_theta_ct: Tensor,       # (B, Ta, Da) — velocity at c_t
     v_theta_ct_prev: Tensor,  # (B, Ta, Da) — velocity at c_{t-1}
@@ -735,7 +735,7 @@ fuses whichever cliff signals are available at the current step
 $I^{(3)}$ from step 2 onward).
 
 ```python
-# phase_centric/cliff_estimators.py
+# phase_centric/cliff_estimators.py  — IMPLEMENTED
 def compute_concordance_C(
     i_hat_values: Sequence[Tensor],   # [I1, ..., Ik], each (B,)
     window_size: int = 50,
@@ -864,13 +864,13 @@ $\mathbb{E}[\beta] > 0.1$ (entropy regulariser is effective).
 | :-- | :-- | :--: | :-- |
 | Phase InfoNCE | `use_chunk_infonce` | ✓ | $-\log\tfrac{\exp(s_{ii}/\tau)}{\sum_j\exp(s_{ij}/\tau)}$ |
 | $\hat I^{(1)}$ Bhattacharyya | `use_phase_boundary_posterior` | ✓ | $-\beta_t = -(1-\sum_k\sqrt{\hat p_t\hat p_{t-1}})$ |
-| $\hat I^{(2)}$ Variance | `pcar_input_signal="variance"` | ⏳ | $-\sigma_t^2 = -\tfrac{1}{N}\sum\|a^{(i)}-\bar a\|^2$ |
-| $\hat I^{(3)}$ Curvature | `pcar_input_signal="curvature"` | ⏳ | $-\|v_\theta(c_t)-v_\theta(c_{t-1})\|^2$ |
-| Concordance $C_t$ | `pcar_input_signal="concordance"` | ⏳ | $\tfrac{1}{3}\sum_k\mathrm{rank}_W(\hat I^{(k)})$ |
+| $\hat I^{(2)}$ Variance | `pcar_input_signal="variance"` | ✓ | $-\sigma_t^2 = -\tfrac{1}{N}\sum\|a^{(i)}-\bar a\|^2$ |
+| $\hat I^{(3)}$ Curvature | `pcar_input_signal="curvature"` | ✓ | $-\|v_\theta(c_t)-v_\theta(c_{t-1})\|^2$ |
+| Concordance $C_t$ | `pcar_input_signal="concordance"` | ✓ | $\tfrac{1}{3}\sum_k\mathrm{rank}_W(\hat I^{(k)})$ |
 | PCAR | `use_pcar` | ✓ | $\tau^{\text{cp}}=\hat Q_n(1-\epsilon)$ |
 | Boundary-aware loss | `use_boundary_reweight` | ✓ | $(1+\lambda\beta_t)\|v-v^*\|^2 - \eta H(\beta)$ |
 
-✓ implemented and tested · ⏳ specified, interface wired, implementation pending
+✓ implemented and tested
 
 ---
 

@@ -52,18 +52,11 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# I_hat_1 — Bhattacharyya cliff estimator  (IMPLEMENTED)
+# I_hat_1 — Bhattacharyya cliff estimator
 # ---------------------------------------------------------------------------
 
 def compute_I_hat_1(phase_beta: torch.Tensor) -> torch.Tensor:
     r"""Cliff estimator :math:`\hat I^{(1)}(t) = -\beta_t`.
-
-    :math:`\beta_t \in [0, 1]` is the Bhattacharyya boundary signal produced by
-    :class:`~lerobot_policy_phaseqflow.phase_centric.phase_posterior.PhasePosteriorEstimator`.
-    Negating it gives a signal that is:
-
-    * high (≈ 0) in stable interior states — high predictability,
-    * low (≈ −1) at phase boundaries — low predictability, i.e. a cliff.
 
     Parameters
     ----------
@@ -283,4 +276,5 @@ __all__ = [
     "compute_I_hat_2",
     "compute_I_hat_3",
     "compute_concordance_C",
+    "_RollingRankBuffer",
 ]
