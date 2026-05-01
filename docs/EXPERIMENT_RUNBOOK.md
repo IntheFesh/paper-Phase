@@ -399,16 +399,16 @@ python scripts/diagnostics/diagnostic_phase_centric.py \
 
 ---
 
-## Part 7 — Seven-config ablation matrix (Table 2)
+## Part 7 — Three-config ablation matrix (Table 2, CoRL submission)
 
-The ablation in `configs/ablation/v2/` has **7 configurations × 3 seeds = 21
-training runs**, each followed by an eval rollout. All seven configurations
-share the **same vision encoder + tokenizer** from stage 1, so you re-use
+The CoRL ablation in `configs/ablation/v2/` has **3 configurations × 3 seeds = 9
+training runs**, each followed by an eval rollout. All three share the same
+vision encoder + tokenizer from stage 1, so you re-use
 `$PACE_CKPT/stage1_pretrain` as the warm start for every row.
 
 > **Important**: ablation configs are *training* configs. Each ablation run
-> follows the same recipe as stage 2 above (and skips stage 3 except for #05
-> and #07, which use replanning).
+> follows the same recipe as stage 2 above (and adds stage 3 calibration for
+> configs that use replanning).
 
 ### 7.1 Configuration matrix
 
@@ -416,45 +416,33 @@ share the **same vision encoder + tokenizer** from stage 1, so you re-use
 |:--:|-------------|:-------------:|:------------------:|:-----------:|
 | 01 | `01_bc_chunked.yaml` | none | no | no |
 | 02 | `02_cliff_via_beta_only.yaml` | β_t (I^(1)) | no | yes |
-| 03 | `03_cliff_via_var_only.yaml` | σ²_t (I^(2)) | no | yes |
-| 04 | `04_cliff_via_curvature_only.yaml` | κ_t (I^(3)) | no | yes |
-| 05 | `05_cliff_concordance.yaml` | C_t (concordance) | no | yes |
-| 06 | `06_oracle_cliff.yaml` | gripper-flip oracle | no | yes |
-| 07 | `07_cliff_concordance_with_boundary_reweight.yaml` | C_t | **yes** | yes |
+| 07 | `07_cliff_concordance_with_boundary_reweight.yaml` | C_t (concordance) | **yes** | yes |
 
-> Rows 03, 04, 05, 07 require `compute_I_hat_2` / `compute_I_hat_3` /
-> `compute_concordance_C` to be implemented (see
-> `lerobot_policy_phaseqflow/phase_centric/cliff_estimators.py`). Until those
-> functions are unblocked, only rows **01, 02, 06** can produce real numbers;
-> the others currently raise `NotImplementedError`.
-
-> **⚠️ Disabled configs (v2.0)**
->
-> | Config | Status | Reason |
-> |--------|--------|--------|
-> | 03 `cliff_via_var_only` | ❌ Disabled | `compute_I_hat_2` → `NotImplementedError` |
-> | 04 `cliff_via_curvature_only` | ❌ Disabled | `compute_I_hat_3` → `NotImplementedError` |
-> | 05 `cliff_concordance` | ⚠️ Partial | Falls back to I^(1) only; ≈ config 02 |
->
-> **Runnable in v2.0**: configs 01, 02, 06, 07 only (4 × 3 seeds = 12 runs).
-> Total GPU time estimate on H800: ~35h (vs. ~60h for full 7-config matrix).
-
-### 7.2 Single ablation row (one config × one seed)
-
-**For v2.0 (storage-constrained, I^2/I^3 pending), run only these four configs:**
+The gap 01 → 02 isolates the value of any cliff signal; 02 → 07 isolates
+multi-estimator fusion + boundary-aware loss. All three estimators
+(`compute_I_hat_1/2/3` and `compute_concordance_C`) are implemented in v2.1
+and exercised by `tests/test_cliff_estimators.py`; Ablation 07 invokes all
+three internally via the concordance signal.
 
 ```bash
-# Runnable configs in v2.0 (I^1 implemented)
+# Ablation configs used by configs/cloud/phaseqflow_cloud_accelerate.sh
 RUNNABLE_CONFIGS=(
     "01_bc_chunked"
     "02_cliff_via_beta_only"
-    "06_oracle_cliff"
     "07_cliff_concordance_with_boundary_reweight"
 )
 ```
 
-For configs 03/04/05 (pending), the placeholder JSON files are auto-generated
-by `scripts/aggregate_ablation.py` with `pending: true` flag.
+### 7.1a Configs not in CoRL submission
+
+The YAMLs `03_cliff_via_var_only.yaml`, `04_cliff_via_curvature_only.yaml`,
+`05_cliff_concordance.yaml`, and `06_oracle_cliff.yaml` remain in the
+codebase as reference but are not part of the submission scope: 03/04 are
+covered by unit tests, 05 is subsumed by 07, and 06 is an oracle upper
+bound. They can be invoked manually with
+`python scripts/training/train_dummy_batch.py` if needed.
+
+### 7.2 Single ablation row (one config × one seed)
 
 ```bash
 ABL_ID=05_cliff_concordance         # change this per row
@@ -612,30 +600,22 @@ python scripts/aggregate_results.py \
 
 ---
 
-## Part 9 — Section 6 phenomenon experiments
+## Part 9 — Section 6 phenomenon experiments (CoRL submission)
 
-These experiments are not about beating baselines — they characterise the
-**predictability cliff** as a phenomenon. Each has a `--dry_run` flag that
-produces synthetic placeholders for plumbing checks; only real GPU rollouts
-produce paper numbers.
+The CoRL submission keeps only **§6.2** and **§6.5** as real experiments —
+the two that directly validate theoretical claims of the paper. §6.1
+(universality across baselines) is dropped because the baseline checkpoints
+exceed the disk budget; §6.3 (triangulation) is redundant with the
+01 → 02 → 07 ablation gap; §6.4 (trigger comparison) is synthetic by design
+and adds no real-data evidence.
 
-### 9.1 §6.1 Universality (Figure 1)
+All four dropped scripts (`universality.py`, `triangulation_concordance.py`,
+`trigger_comparison.py`, `measure_inference_cost.py`) are still in the
+codebase; they are simply not invoked by `configs/cloud/phaseqflow_cloud_accelerate.sh`.
 
-Cliff occurrence across four VLA policies:
+### 9.1 §6.2 Regret scaling (Figure 4)
 
-```bash
-python scripts/phenomenon/universality.py \
-    --policies bc_act diffusion_policy openvla_7b pi0 \
-    --baseline_ckpts "$PACE_CKPT/baselines" \
-    --suite libero_long \
-    --n_rollouts 50 --seeds 0 1 2 \
-    --output "$PACE_FIG/universality/"
-# ≈ 8 h on A100; produces raw_distances.json + KS p-values.
-```
-
-### 9.2 §6.2 Regret scaling (Figure 4)
-
-δSR vs. chunk length H:
+δSR vs. chunk length H — validates the regret bound:
 
 ```bash
 for H in 4 8 16 32 64; do
@@ -647,31 +627,7 @@ done
 # ≈ 6 h total
 ```
 
-### 9.3 §6.3 Triangulation concordance (Figure 5)
-
-Precision/recall of single estimators vs. C_t:
-
-```bash
-python scripts/phenomenon/triangulation_concordance.py \
-    --ckpt "$PACE_FINAL" --suite libero_long \
-    --n_rollouts 200 --seeds 0 1 2 \
-    --output "$PACE_FIG/triangulation/"
-# ≈ 5 h. Writes pr_curves.json + table_6_3.tex.
-```
-
-### 9.4 §6.4 Alternative cliff detectors
-
-```bash
-python scripts/diagnostics/diagnostic_utils/trigger_comparison.py \
-    --ckpt "$PACE_FINAL" --suite libero_long \
-    --detectors concordance,beta,kl,js,entropy,bocpd \
-    --tolerance_steps 5 \
-    --n_rollouts 200 --seeds 0 1 2 \
-    --output "$PACE_FIG/trigger_comparison/"
-# ≈ 5 h. Writes comparison_table.tex (= §6.4 table in README).
-```
-
-### 9.5 §6.5 Boundary loss ratio
+### 9.2 §6.5 Boundary loss ratio
 
 ```bash
 python scripts/diagnostics/diagnostic_utils/measure_boundary_error.py \
