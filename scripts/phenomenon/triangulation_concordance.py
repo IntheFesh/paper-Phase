@@ -284,11 +284,44 @@ def _collect_real_episodes(
 
     episodes: List[EpisodeSignals] = []
 
-    # env_factory is not available here; caller must inject
-    raise RuntimeError(
-        "Real episode collection requires a LIBERO-Long env_factory. "
-        "Inject via --env_factory or run with --dry_run."
-    )
+    # Try to obtain a real LIBERO env_factory; signal fallback to dry_run if missing.
+    from scripts.phenomenon._env_factory import build_libero_env_factory
+    env_factory = build_libero_env_factory(task="libero_long")
+    if env_factory is None:
+        # Signal to caller (main()) that it should fall back to dry_run synthetic data.
+        return None  # type: ignore[return-value]
+
+    # I^(2) and I^(3) are now implemented (v2.1) — concordance combines all three.
+    for ep_idx, seed in enumerate(seeds[:n_episodes]):
+        env = env_factory()
+        if env is None:
+            continue
+        try:
+            obs = env.reset(seed=seed) if hasattr(env, "reset") else None
+            beta_seq: List[float] = []
+            var_seq: List[float] = []
+            curv_seq: List[float] = []
+            done = False
+            step = 0
+            while not done and step < 400:
+                obs_batch = obs if isinstance(obs, dict) else {"obs": obs}
+                with torch.no_grad():
+                    out = policy.predict_action(obs_batch)
+                action = out.get("action_pred")
+                beta_seq.append(float(out.get("phase_beta", torch.tensor(0.0)).mean().item()))
+                if "I_hat_2" in out:
+                    var_seq.append(float(out["I_hat_2"].mean().item()))
+                if "I_hat_3" in out:
+                    curv_seq.append(float(out["I_hat_3"].mean().item()))
+                step += 1
+                obs, _, done, _ = env.step(action.detach().cpu().numpy()) if action is not None else (obs, 0, True, {})
+            episodes.append(EpisodeSignals(beta=beta_seq, variance=var_seq, curvature=curv_seq))
+        finally:
+            try:
+                env.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return episodes
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +427,12 @@ def main(argv=None) -> int:
             seeds=args.seeds,
             device=args.device,
         )
+        if episodes is None:
+            print("[triangulation] WARNING: LIBERO env unavailable; falling back to dry_run")
+            episodes = [
+                _synthetic_episode(T=200, n_transitions=3, rng=rng)
+                for _ in range(args.n_episodes)
+            ]
 
     rows = _evaluate_episodes(episodes, tolerance=args.tolerance)
 

@@ -114,7 +114,7 @@ def _try_rliable_ci(
         iqms, cis = rly.get_interval_estimates(
             score_dict, aggregate_fn, reps=n_bootstrap
         )
-        return float(iqms["method"][0]), float(cis["method"][0][0]), float(cis["method"][0][1])
+        return float(iqms["method"]), float(cis["method"][0][0]), float(cis["method"][1][0])
     except ImportError:
         return None
 
@@ -193,10 +193,24 @@ _REAL_METHODS = [
 ]
 
 
-def _load_eval_results(input_root: Path) -> Dict[str, Dict[str, np.ndarray]]:
-    """Load per-seed success rates: {method: {benchmark: np.ndarray(n_seeds)}}."""
+def _load_eval_results(
+    input_root: Path,
+) -> tuple[Dict[str, Dict[str, np.ndarray]], Dict[str, Dict[str, bool]]]:
+    """Load per-seed success rates and per-method-benchmark placeholder status.
+
+    Returns
+    -------
+    results : dict
+        ``{method: {benchmark: np.ndarray(n_seeds)}}`` of real-or-placeholder SRs.
+    placeholder_flags : dict
+        ``{method: {benchmark: True/False}}`` — True means at least one
+        contributing eval_results.json had ``placeholder=true``.
+    """
     results: Dict[str, Dict[str, List[float]]] = {
         m: {b: [] for b in _BENCHMARKS} for m in _METHODS
+    }
+    placeholder_flags: Dict[str, Dict[str, bool]] = {
+        m: {b: False for b in _BENCHMARKS} for m in _METHODS
     }
     for method_dir in sorted(input_root.iterdir()):
         if not method_dir.is_dir():
@@ -207,14 +221,20 @@ def _load_eval_results(input_root: Path) -> Dict[str, Dict[str, np.ndarray]]:
         for eval_json in sorted(method_dir.glob("*/eval_results.json")):
             try:
                 data = json.loads(eval_json.read_text())
+                is_placeholder = bool(data.get("placeholder", False))
                 for bm in _BENCHMARKS:
                     sr = data.get(f"{bm}_sr")
                     if sr is not None:
                         results[method_name][bm].append(float(sr))
+                        if is_placeholder:
+                            placeholder_flags[method_name][bm] = True
             except Exception:
                 continue
 
-    return {m: {b: np.array(v) for b, v in bms.items()} for m, bms in results.items()}
+    return (
+        {m: {b: np.array(v) for b, v in bms.items()} for m, bms in results.items()},
+        placeholder_flags,
+    )
 
 
 def _synthetic_results(rng: np.random.Generator, n_seeds: int = 3) -> Dict[str, Dict[str, np.ndarray]]:
@@ -362,12 +382,15 @@ def main(argv=None) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)
 
+    placeholder_flags: Dict[str, Dict[str, bool]] = {}
     if args.dry_run or not args.input_root.exists():
         if not args.dry_run:
             print(f"[aggregate_ablation] {args.input_root} not found; running dry_run")
         results = _synthetic_results(rng, n_seeds=args.n_seeds)
+        all_synthetic = True
     else:
-        results = _load_eval_results(args.input_root)
+        results, placeholder_flags = _load_eval_results(args.input_root)
+        all_synthetic = False
 
     baseline = results.get(_BASELINE_METHOD, {})
 
@@ -387,6 +410,12 @@ def main(argv=None) -> int:
                 note = "dry_run"
             elif method in _PENDING_METHODS:
                 note = "pending"
+            elif all_synthetic:
+                note = "synthetic"
+            elif placeholder_flags.get(method, {}).get(bm, False):
+                note = "placeholder"
+            else:
+                note = "real"
             rows.append({"method": method, "benchmark": bm, **stats, "note": note})
 
     # Save CSV

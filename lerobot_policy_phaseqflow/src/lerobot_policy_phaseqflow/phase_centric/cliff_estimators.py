@@ -30,12 +30,23 @@ Concordance detector (rank-based fusion):
 
 where :math:`\\mathrm{rank}_W` is the percentile rank within a rolling window of
 size ``W``.
+
+Implementation status
+---------------------
+* :func:`compute_I_hat_1` — IMPLEMENTED (wraps existing ``phase_beta`` / β_t).
+* :func:`compute_I_hat_2` — IMPLEMENTED (action variance estimator).
+* :func:`compute_I_hat_3` — IMPLEMENTED (velocity curvature estimator).
+* :func:`compute_concordance_C` — IMPLEMENTED (rank-window fusion).
+
+Internal names (Round-4 vintage) are kept as implementation details inside
+``phase_posterior.py`` and ``modeling_phaseqflow.py``; only the cliff-namespace
+names defined here are the public-facing interface.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, List, Optional, Sequence
+from typing import Deque, Optional, Sequence
 
 import torch
 
@@ -61,143 +72,170 @@ def compute_I_hat_1(phase_beta: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# I_hat_2 — action-variance cliff estimator
+# I_hat_2 — action-variance cliff estimator  (IMPLEMENTED)
 # ---------------------------------------------------------------------------
 
-def compute_I_hat_2(action_samples: torch.Tensor) -> torch.Tensor:
+def compute_I_hat_2(
+    action_samples: torch.Tensor,
+) -> torch.Tensor:
     r"""Cliff estimator :math:`\hat I^{(2)}(t) = -\sigma_t^2`.
 
-    Computes the negative mean squared deviation of ``N`` action samples around
-    their batch mean.  Higher magnitude (more negative) means higher action
-    variance, i.e. lower predictability — a cliff signal.
+    Computes the negative mean per-sample squared deviation from the batch
+    mean action:
+
+    .. math::
+
+        \hat I^{(2)}(t) = -\frac{1}{N}\sum_{i=1}^{N}\|a_t^{(i)} - \bar a_t\|^2
+
+    A high (near-zero) value indicates that all ``N`` sampled actions agree
+    (low variance, high predictability).  A low value indicates spread action
+    predictions, which is a reliable signal of an impending phase boundary.
 
     Parameters
     ----------
     action_samples : Tensor
-        Shape ``(N, B, Ta, Da)`` where:
-        * ``N`` — number of independent samples (≥ 2),
-        * ``B`` — batch size,
-        * ``Ta`` — action horizon,
-        * ``Da`` — action dimension.
+        Shape ``(N, B, Ta, Da)`` — ``N`` stochastic samples of the action
+        chunk, batch size ``B``, chunk length ``Ta``, action dim ``Da``.
+        Requires ``N ≥ 2``.
 
     Returns
     -------
     Tensor
-        Shape ``(B,)``, values ≤ 0.
+        Shape ``(B,)``, values in ``(-∞, 0]``.  Zero means all samples agree
+        exactly; more negative means higher variance.
 
     Raises
     ------
     ValueError
-        If ``action_samples.ndim != 4`` or ``N < 2``.
+        If ``action_samples`` is not 4-D or ``N < 2``.
     """
     if action_samples.ndim != 4:
         raise ValueError(
-            f"action_samples must be 4-D (N, B, Ta, Da), got shape {action_samples.shape}"
+            f"action_samples must be 4-D (N, B, Ta, Da); got shape {tuple(action_samples.shape)}"
         )
     N = action_samples.shape[0]
     if N < 2:
-        raise ValueError(f"Need N >= 2 action samples to estimate variance, got N={N}")
-
-    mean_action = action_samples.mean(dim=0, keepdim=True)          # (1, B, Ta, Da)
+        raise ValueError(f"Need N≥2 action samples for variance estimate; got N={N}")
+    mean_action = action_samples.mean(dim=0, keepdim=True)  # (1, B, Ta, Da)
     sq_dev = (action_samples - mean_action).pow(2).sum(dim=(-2, -1))  # (N, B)
-    return -sq_dev.mean(dim=0)                                        # (B,)
+    sigma2 = sq_dev.mean(dim=0)  # (B,)
+    return -sigma2
 
 
 # ---------------------------------------------------------------------------
-# I_hat_3 — velocity-curvature cliff estimator
+# I_hat_3 — velocity-difference cliff estimator  (IMPLEMENTED)
 # ---------------------------------------------------------------------------
 
 def compute_I_hat_3(
     v_theta_ct: torch.Tensor,
     v_theta_ct_prev: torch.Tensor,
 ) -> torch.Tensor:
-    r"""Cliff estimator :math:`\hat I^{(3)}(t) = -\|v_\theta(c_t) - v_\theta(c_{t-1})\|^2`.
+    r"""Cliff estimator :math:`\hat I^{(3)}(t)`.
 
-    Measures how much the flow-matching velocity field changed between consecutive
-    condition vectors at a fixed anchor point ``(x_τ, τ)``.  Large change →
-    lower predictability → cliff signal.
+    Measures the squared L2 norm of the velocity-field change when the
+    conditioning vector shifts from :math:`c_{t-1}` to :math:`c_t` at a
+    fixed anchor :math:`(x_\tau, \tau)`:
+
+    .. math::
+
+        \hat I^{(3)}(t) = -\|v_\theta(x_\tau,\tau,c_t)
+                             - v_\theta(x_\tau,\tau,c_{t-1})\|_2^2
+
+    A high (near-zero) value means the flow field barely changed between
+    consecutive steps — stable phase.  A large negative value indicates a
+    sharp velocity shift, i.e. a cliff.
 
     Parameters
     ----------
     v_theta_ct : Tensor
-        Velocity at current condition, shape ``(B, Ta, Da)``.
+        Velocity at current step.  Shape ``(B, Ta, Da)`` or ``(B, D)``.
     v_theta_ct_prev : Tensor
-        Velocity at previous condition, same shape.
+        Velocity at previous step.  Same shape as ``v_theta_ct``.
 
     Returns
     -------
     Tensor
-        Shape ``(B,)``, values ≤ 0.
+        Shape ``(B,)``, values in ``(-∞, 0]``.
 
     Raises
     ------
     ValueError
-        If ``v_theta_ct.shape != v_theta_ct_prev.shape``.
+        If the two tensors have different shapes.
     """
     if v_theta_ct.shape != v_theta_ct_prev.shape:
         raise ValueError(
-            f"Shape mismatch: v_theta_ct {v_theta_ct.shape} vs "
-            f"v_theta_ct_prev {v_theta_ct_prev.shape}"
+            f"v_theta_ct and v_theta_ct_prev must have the same shape; "
+            f"got {tuple(v_theta_ct.shape)} vs {tuple(v_theta_ct_prev.shape)}"
         )
-    diff = v_theta_ct - v_theta_ct_prev                             # (B, Ta, Da)
-    sq_norm = diff.reshape(diff.shape[0], -1).pow(2).sum(dim=-1)    # (B,)
+    diff = v_theta_ct - v_theta_ct_prev
+    # Flatten all dims except batch, then sum of squares per sample.
+    sq_norm = diff.reshape(diff.shape[0], -1).pow(2).sum(dim=-1)  # (B,)
     return -sq_norm
 
 
 # ---------------------------------------------------------------------------
-# Rolling-rank buffer for concordance
+# Concordance C_t  (IMPLEMENTED)
 # ---------------------------------------------------------------------------
 
 class _RollingRankBuffer:
-    """Online percentile-rank tracker over a fixed-length window."""
+    """Maintain a deque of scalar values and return percentile rank of the latest entry."""
 
     def __init__(self, window_size: int) -> None:
-        self._buf: deque[float] = deque(maxlen=window_size)
+        self._buf: Deque[float] = deque(maxlen=window_size)
 
     def push_and_rank(self, value: float) -> float:
-        """Push *value* and return its percentile rank in [0, 1]."""
+        """Add ``value`` and return its percentile rank in [0, 1] within the window."""
         self._buf.append(value)
         n = len(self._buf)
         if n == 1:
             return 0.5
-        return sum(1.0 for x in self._buf if x <= value) / n
+        rank = sum(1 for x in self._buf if x <= value)
+        return rank / n
 
+    def reset(self) -> None:
+        self._buf.clear()
 
-# ---------------------------------------------------------------------------
-# Concordance C_t — rank-based fusion of all three estimators
-# ---------------------------------------------------------------------------
 
 def compute_concordance_C(
     i_hat_values: Sequence[torch.Tensor],
     window_size: int = 50,
-    _state: Optional[Dict] = None,
+    _state: Optional[dict] = None,
 ) -> torch.Tensor:
-    r"""Concordance detector :math:`C_t \in [0, 1]`.
+    r"""Concordance detector :math:`C_t` — rank-window fusion of cliff signals.
 
-    :math:`C_t = \frac{1}{K}\sum_{k=1}^{K}\mathrm{rank}_W(\hat I^{(k)}(t))`
+    .. math::
 
-    where :math:`\mathrm{rank}_W` is the percentile rank within a rolling window
-    of the last ``window_size`` values for estimator ``k`` and batch element
-    ``b``.
+        C_t = \frac{1}{K}\sum_{k=1}^{K}\mathrm{rank}_W(\hat I^{(k)}(t))
+
+    where :math:`\mathrm{rank}_W(x)` is the percentile rank of scalar ``x``
+    within a sliding window of the most recent ``window_size`` values of that
+    estimator.  The result lies in ``[0, 1]``: low values signal concordant
+    cliff evidence across all ``K`` estimators.
+
+    Each call is stateless when ``_state`` is ``None`` — a fresh ranking
+    window is created.  For online use across timesteps, pass a dict and
+    reuse it across calls::
+
+        state = {}
+        for step in range(T):
+            C_t = compute_concordance_C([i1[step], i2[step], i3[step]],
+                                         window_size=50, _state=state)
 
     Parameters
     ----------
     i_hat_values : sequence of Tensor
-        Each tensor has shape ``(B,)``.  Typically the list
-        ``[I_hat_1, I_hat_2, I_hat_3]`` but any non-empty subset is accepted.
+        Each tensor has shape ``(B,)``.  The sequence length ``K`` must be
+        ≥ 1; typically ``K = 3``.
     window_size : int
-        Rolling-window length for percentile ranking (default 50).
-    _state : dict or None
-        Persistent rank-buffer state across calls.  Pass the same dict on
-        every forward step so that the rolling window accumulates correctly.
-        If ``None``, a fresh (memoryless) state is used — suitable only for
-        unit tests.
+        Rolling window depth for percentile ranking (default 50).
+    _state : dict, optional
+        Mutable dict for persisting :class:`_RollingRankBuffer` objects
+        across timesteps.  Keyed by estimator index.
 
     Returns
     -------
     Tensor
-        Shape ``(B,)``, values in ``[0, 1]``.  High ≈ cliff (all estimators
-        agree on low predictability); low ≈ stable interior.
+        Shape ``(B,)``, values in ``[0, 1]``.
 
     Raises
     ------
@@ -205,28 +243,30 @@ def compute_concordance_C(
         If ``i_hat_values`` is empty or tensors have inconsistent batch sizes.
     """
     if len(i_hat_values) == 0:
-        raise ValueError("i_hat_values must contain at least one estimator tensor")
-
-    K = len(i_hat_values)
+        raise ValueError("i_hat_values must contain at least one tensor")
     B = i_hat_values[0].shape[0]
-    for k, t in enumerate(i_hat_values):
-        if t.shape[0] != B:
+    for idx, v in enumerate(i_hat_values):
+        if v.shape[0] != B:
             raise ValueError(
-                f"Batch-size mismatch: i_hat_values[0] has B={B} but "
-                f"i_hat_values[{k}] has B={t.shape[0]}"
+                f"Inconsistent batch size: i_hat_values[0] has B={B}, "
+                f"i_hat_values[{idx}] has B={v.shape[0]}"
             )
 
     if _state is None:
         _state = {}
 
-    rank_sum = torch.zeros(B, dtype=torch.float32, device=i_hat_values[0].device)
+    K = len(i_hat_values)
+    device = i_hat_values[0].device
+    dtype = i_hat_values[0].dtype
+    rank_sum = torch.zeros(B, device=device, dtype=dtype)
 
     for k, i_hat in enumerate(i_hat_values):
         if k not in _state:
             _state[k] = [_RollingRankBuffer(window_size) for _ in range(B)]
-        buffers: List[_RollingRankBuffer] = _state[k]
+        buffers = _state[k]
         for b in range(B):
-            rank_sum[b] += buffers[b].push_and_rank(float(i_hat[b].detach()))
+            val = float(i_hat[b].detach().cpu())
+            rank_sum[b] = rank_sum[b] + buffers[b].push_and_rank(val)
 
     return rank_sum / K
 

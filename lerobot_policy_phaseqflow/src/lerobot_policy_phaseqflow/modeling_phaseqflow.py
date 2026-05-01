@@ -1519,8 +1519,9 @@ class PhaseQFlowPolicy(nn.Module):
         self._rollout_chunk: Optional[torch.Tensor] = None
         self._rollout_chunk_start: int = 0
         self._iql_step_counter: int = 0
-        # Cliff-estimator rollout state (cleared by reset())
+        # I_hat_3 velocity cache: stores v_θ(anchor, c_{t-1}) between forward calls
         self._v_theta_prev: Optional[torch.Tensor] = None
+        # concordance state: rolling rank buffers keyed by estimator index
         self._concordance_state: dict = {}
         if bool(getattr(config, "use_temporal_ensembling", False)) and self.flow_type == "shortcut":
             from .temporal_ensembler import ACTTemporalEnsembler
@@ -1785,42 +1786,52 @@ class PhaseQFlowPolicy(nn.Module):
                 compute_I_hat_3,
                 compute_concordance_C,
             )
-            preds["I_hat_1"] = compute_I_hat_1(phase_beta)
+            i_hat_1 = compute_I_hat_1(phase_beta)
+            preds["I_hat_1"] = i_hat_1
 
-            # I_hat_3: velocity-field curvature at a fixed anchor (x=0, tau=0.5)
-            _flow_head = self.pace_b_flow_head if self.pace_b_flow_head is not None else self.flow_action_head
-            if hasattr(_flow_head, "compute_cond") and hasattr(_flow_head, "velocity"):
+            # I_hat_3: velocity curvature — requires two consecutive cond vectors.
+            # We evaluate v_θ at a fixed Gaussian anchor (x_τ=0, τ=0.5) so the
+            # only variable is the conditioning vector c_t vs c_{t-1}.
+            i_hat_3: Optional[torch.Tensor] = None
+            if hasattr(self.flow_action_head, "compute_cond") and hasattr(self.flow_action_head, "velocity"):
                 try:
-                    B_f = fused_obs.shape[0]
-                    Ta = int(self.config.action_chunk_size)
-                    Da = int(self.config.action_dim)
-                    cond_t = _flow_head.compute_cond(
+                    cond_t = self.flow_action_head.compute_cond(
                         fused_obs, plan["phase_embed"], plan["skill_latent"]
                     )
-                    anchor = torch.zeros(B_f, Ta, Da, device=fused_obs.device, dtype=fused_obs.dtype)
-                    v_theta_ct = _flow_head.velocity(anchor, tau=0.5, cond=cond_t).detach()
-                    if (
-                        self._v_theta_prev is not None
-                        and self._v_theta_prev.shape == v_theta_ct.shape
-                    ):
-                        preds["I_hat_3"] = compute_I_hat_3(v_theta_ct, self._v_theta_prev)
-                    self._v_theta_prev = v_theta_ct
+                    B_f = cond_t.shape[0]
+                    Ta = int(self.config.action_chunk_size)
+                    Da = int(self.config.action_dim)
+                    anchor = torch.zeros(B_f, Ta, Da, device=cond_t.device, dtype=cond_t.dtype)
+                    v_theta_ct = self.flow_action_head.velocity(anchor, tau=0.5, cond=cond_t)
+                    if self._v_theta_prev is not None and self._v_theta_prev.shape == v_theta_ct.shape:
+                        i_hat_3 = compute_I_hat_3(v_theta_ct, self._v_theta_prev)
+                        preds["I_hat_3"] = i_hat_3
+                    self._v_theta_prev = v_theta_ct.detach()
                 except Exception:  # noqa: BLE001
                     pass
 
-            # I_hat_2: action-sample variance from BID multi-sample chunks
-            bid_chunks = preds.get("bid_chunks")
-            if isinstance(bid_chunks, torch.Tensor) and bid_chunks.ndim == 4 and bid_chunks.shape[0] >= 2:
+            # I_hat_2: action variance — available only when BID sampler ran N≥2 samples.
+            i_hat_2: Optional[torch.Tensor] = None
+            if "bid_chunks" in preds:
                 try:
-                    preds["I_hat_2"] = compute_I_hat_2(bid_chunks)
+                    chunks = preds["bid_chunks"]  # (N, B, Ta, Da) or (N, Ta, Da)
+                    if chunks.ndim == 3:
+                        chunks = chunks.unsqueeze(1)
+                    if chunks.shape[0] >= 2:
+                        i_hat_2 = compute_I_hat_2(chunks)
+                        preds["I_hat_2"] = i_hat_2
                 except Exception:  # noqa: BLE001
                     pass
 
-            # concordance C_t: rank-based fusion of available estimators
-            available_hats = [v for k, v in preds.items() if k in ("I_hat_1", "I_hat_2", "I_hat_3")]
-            if available_hats:
+            # Concordance C_t: fuse whichever estimators are available this step.
+            available = [i_hat_1]
+            if i_hat_2 is not None:
+                available.append(i_hat_2)
+            if i_hat_3 is not None:
+                available.append(i_hat_3)
+            if len(available) >= 1:
                 preds["concordance_C"] = compute_concordance_C(
-                    available_hats, window_size=50, _state=self._concordance_state
+                    available, window_size=50, _state=self._concordance_state
                 )
 
         if beta_micro is not None:
@@ -2147,6 +2158,8 @@ class PhaseQFlowPolicy(nn.Module):
             self.pace_b_flow_head.reset_switching(batch_size=1)
         if self._pcar_trigger is not None:
             self._pcar_trigger.reset()
+        self._v_theta_prev = None
+        self._concordance_state = {}
         if self._use_pcar_dual_head and hasattr(self.flow_action_head, "reset"):
             try:
                 self.flow_action_head.reset(batch_size=1)

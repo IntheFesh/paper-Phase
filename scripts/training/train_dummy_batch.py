@@ -284,12 +284,14 @@ def _build_parser() -> argparse.ArgumentParser:
                              "eval_results.json (placeholder=true in CPU "
                              "dry-runs) and train_log.json here at the end.")
     parser.add_argument(
-        "--real-data",
-        action="store_true",
+        "--data_root",
+        type=str,
+        default=None,
         help=(
-            "Reserved real-data path; not supported in Round 2. Round 3+ will "
-            "wire in the LeRobot / LIBERO dataloader. Passing this flag "
-            "explicitly raises NotImplementedError to prevent misuse."
+            "Path to a local LeRobot-format dataset directory, or a "
+            "HuggingFace Hub repo-id (e.g. 'HuggingFaceVLA/smol-libero'). "
+            "When provided the real LeRobotDataset is used instead of "
+            "synthetic dummy batches. Falls back to $DATASET_REPO_ID env var."
         ),
     )
     parser.add_argument("--micro-batch", type=int, default=2,
@@ -507,16 +509,83 @@ def _write_eval_results(
     (output_dir / "eval_results.json").write_text(json.dumps(payload, indent=2))
 
 
+def _build_real_dataloader(
+    data_root: str,
+    batch_size: int,
+    cfg: "PhaseQFlowConfig",
+) -> "Any":
+    """Construct a LeRobotDataset + DataLoader + PhaseQFlowProcessor.
+
+    Returns a dict with keys ``loader`` (an infinite cycling iterator) and
+    ``processor`` (:class:`PhaseQFlowProcessor`).  Raises ``ImportError`` when
+    the ``lerobot`` package is missing; the caller falls back to dummy batches.
+
+    The ``data_root`` argument can be:
+    * A local path — ``LeRobotDataset(..., root=data_root)`` is used.
+    * A HuggingFace Hub repo-id (contains ``/`` but no leading ``/``) —
+      passed directly as ``repo_id``; HF Hub caches the download.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        try:
+            # lerobot >= 0.3
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError:
+            # lerobot < 0.3 (common.datasets path)
+            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset  # type: ignore[no-redef]
+    except ImportError as exc:
+        raise ImportError(
+            "lerobot package not found; install it with:\n"
+            "  pip install lerobot\n"
+            "or omit --data_root to use synthetic dummy batches."
+        ) from exc
+
+    from lerobot_policy_phaseqflow.processor_pc_vla import (
+        PhaseQFlowProcessor,
+        ProcessorConfig,
+    )
+
+    p = _Path(data_root)
+    is_local = p.exists() and p.is_dir()
+    if is_local:
+        dataset = LeRobotDataset(repo_id=p.name, root=str(p.parent))
+    else:
+        dataset = LeRobotDataset(repo_id=data_root)
+
+    processor = PhaseQFlowProcessor(
+        ProcessorConfig(
+            action_chunk_size=int(cfg.action_chunk_size),
+            num_camera_views=2,
+            enable_language_tokenizer=False,
+        )
+    )
+
+    import torch
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        drop_last=True,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    def _infinite(dl: "Any"):
+        while True:
+            yield from dl
+
+    return {"loader": _infinite(loader), "processor": processor}
+
+
 def main(argv: List[str] | None = None) -> int:
     """Parse CLI args, build the policy, run the dummy-batch loop, and emit artefacts."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.real_data:
-        raise NotImplementedError(
-            "--real-data is a placeholder in Round 2. Real dataloader "
-            "(LeRobot / LIBERO) will be wired in Round 3+."
-        )
+    # Resolve data_root: CLI arg > DATASET_REPO_ID env var
+    import os
+    data_root = getattr(args, "data_root", None) or os.environ.get("DATASET_REPO_ID")
 
     total_steps = int(args.total_steps) if args.total_steps is not None else int(args.steps)
 
@@ -535,6 +604,31 @@ def main(argv: List[str] | None = None) -> int:
         print(f"[train_local] CLI overrides: {override_log}")
     if args.output_dir is not None:
         print(f"[train_local] output_dir = {args.output_dir}")
+
+    # When --data_root is provided, the real LeRobotDataset path is REQUIRED.
+    # No silent fallback to dummy batches: production runs must train on real
+    # LIBERO data, and accidental dummy training would silently invalidate
+    # weeks of eval. Set PACE_ALLOW_DUMMY_FALLBACK=1 only when explicitly
+    # debugging.
+    real_loader = None
+    real_processor = None
+    if data_root is not None:
+        try:
+            dl_info = _build_real_dataloader(data_root, args.micro_batch, cfg)
+            real_loader = dl_info["loader"]
+            real_processor = dl_info["processor"]
+            print(f"[train_local] real dataloader: {data_root}")
+        except Exception as exc:  # noqa: BLE001
+            if os.environ.get("PACE_ALLOW_DUMMY_FALLBACK") == "1":
+                print(f"[train_local] WARNING: could not build real dataloader "
+                      f"({exc!r}); PACE_ALLOW_DUMMY_FALLBACK=1 set, using dummy batches.")
+            else:
+                raise RuntimeError(
+                    f"--data_root {data_root!r} was given but the real "
+                    f"LeRobotDataset could not be constructed: {exc!r}. "
+                    "Set PACE_ALLOW_DUMMY_FALLBACK=1 to opt into dummy-batch "
+                    "fallback for debugging only."
+                ) from exc
 
     policy = PhaseQFlowPolicy(cfg).to(device).train()
     _ = policy.compute_loss(_make_dummy_batch(cfg, args.micro_batch, device))
@@ -586,7 +680,28 @@ def main(argv: List[str] | None = None) -> int:
     for step in range(start_step, total_steps):
         step_t0 = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
-        batch = _make_dummy_batch(cfg, args.micro_batch, device)
+        if real_loader is not None and real_processor is not None:
+            raw_batch = next(real_loader)
+            # raw_batch is a list-of-dicts or a collated dict from LeRobot
+            if isinstance(raw_batch, dict):
+                raw_list = [{k: v[i] for k, v in raw_batch.items()} for i in range(args.micro_batch)]
+            else:
+                raw_list = list(raw_batch)[:args.micro_batch]
+            try:
+                batch = real_processor(raw_list, training=True)
+                # Move all tensors to device
+                batch = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else
+                       {kk: vv.to(device) if isinstance(vv, torch.Tensor) else vv
+                        for kk, vv in v.items()} if isinstance(v, dict) else v
+                    for k, v in batch.items()
+                }
+                batch["timestep"] = torch.zeros(args.micro_batch, dtype=torch.long, device=device)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("real batch processing failed (%r); using dummy batch", exc)
+                batch = _make_dummy_batch(cfg, args.micro_batch, device)
+        else:
+            batch = _make_dummy_batch(cfg, args.micro_batch, device)
         out = policy.compute_loss(batch, return_dict=True)
         loss = out["loss"]
         loss.backward()
@@ -665,13 +780,20 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.output_dir is not None:
         out_dir = Path(args.output_dir)
-        _write_eval_results(
-            output_dir=out_dir,
-            mode=args.phase_centric_mode,
-            seed=int(args.seed),
-            total_steps=total_steps,
-            loss_history=loss_history,
-        )
+        # Only write the placeholder eval_results.json when training on dummy
+        # batches. With real data, the GPU eval harness (run_eval_libero.sh)
+        # is responsible for producing the real eval_results.json — writing
+        # a placeholder here would silently shadow the real numbers.
+        if real_loader is None:
+            _write_eval_results(
+                output_dir=out_dir,
+                mode=args.phase_centric_mode,
+                seed=int(args.seed),
+                total_steps=total_steps,
+                loss_history=loss_history,
+            )
+        else:
+            print("[train_local] real-data run: eval_results.json deferred to LIBERO eval harness")
         print(f"[train_local] wrote {out_dir / 'eval_results.json'}")
     return 0
 
