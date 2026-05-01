@@ -1519,6 +1519,10 @@ class PhaseQFlowPolicy(nn.Module):
         self._rollout_chunk: Optional[torch.Tensor] = None
         self._rollout_chunk_start: int = 0
         self._iql_step_counter: int = 0
+        # I_hat_3 velocity cache: stores v_θ(anchor, c_{t-1}) between forward calls
+        self._v_theta_prev: Optional[torch.Tensor] = None
+        # concordance state: rolling rank buffers keyed by estimator index
+        self._concordance_state: dict = {}
         if bool(getattr(config, "use_temporal_ensembling", False)) and self.flow_type == "shortcut":
             from .temporal_ensembler import ACTTemporalEnsembler
 
@@ -1776,9 +1780,60 @@ class PhaseQFlowPolicy(nn.Module):
             preds["phase_p_hat"] = phase_p_hat
         if phase_beta is not None:
             preds["phase_beta"] = phase_beta
-            # Cliff-namespace public-facing interface: I_hat_1 = -beta_t
-            from .phase_centric.cliff_estimators import compute_I_hat_1
-            preds["I_hat_1"] = compute_I_hat_1(phase_beta)
+            from .phase_centric.cliff_estimators import (
+                compute_I_hat_1,
+                compute_I_hat_2,
+                compute_I_hat_3,
+                compute_concordance_C,
+            )
+            i_hat_1 = compute_I_hat_1(phase_beta)
+            preds["I_hat_1"] = i_hat_1
+
+            # I_hat_3: velocity curvature — requires two consecutive cond vectors.
+            # We evaluate v_θ at a fixed Gaussian anchor (x_τ=0, τ=0.5) so the
+            # only variable is the conditioning vector c_t vs c_{t-1}.
+            i_hat_3: Optional[torch.Tensor] = None
+            if hasattr(self.flow_action_head, "compute_cond") and hasattr(self.flow_action_head, "velocity"):
+                try:
+                    cond_t = self.flow_action_head.compute_cond(
+                        fused_obs, plan["phase_embed"], plan["skill_latent"]
+                    )
+                    B_f = cond_t.shape[0]
+                    Ta = int(self.config.action_chunk_size)
+                    Da = int(self.config.action_dim)
+                    anchor = torch.zeros(B_f, Ta, Da, device=cond_t.device, dtype=cond_t.dtype)
+                    v_theta_ct = self.flow_action_head.velocity(anchor, tau=0.5, cond=cond_t)
+                    if self._v_theta_prev is not None and self._v_theta_prev.shape == v_theta_ct.shape:
+                        i_hat_3 = compute_I_hat_3(v_theta_ct, self._v_theta_prev)
+                        preds["I_hat_3"] = i_hat_3
+                    self._v_theta_prev = v_theta_ct.detach()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # I_hat_2: action variance — available only when BID sampler ran N≥2 samples.
+            i_hat_2: Optional[torch.Tensor] = None
+            if "bid_chunks" in preds:
+                try:
+                    chunks = preds["bid_chunks"]  # (N, B, Ta, Da) or (N, Ta, Da)
+                    if chunks.ndim == 3:
+                        chunks = chunks.unsqueeze(1)
+                    if chunks.shape[0] >= 2:
+                        i_hat_2 = compute_I_hat_2(chunks)
+                        preds["I_hat_2"] = i_hat_2
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # Concordance C_t: fuse whichever estimators are available this step.
+            available = [i_hat_1]
+            if i_hat_2 is not None:
+                available.append(i_hat_2)
+            if i_hat_3 is not None:
+                available.append(i_hat_3)
+            if len(available) >= 1:
+                preds["concordance_C"] = compute_concordance_C(
+                    available, window_size=50, _state=self._concordance_state
+                )
+
         if beta_micro is not None:
             preds["beta_micro"] = beta_micro
         return preds
@@ -2101,6 +2156,8 @@ class PhaseQFlowPolicy(nn.Module):
             self.pace_b_flow_head.reset_switching(batch_size=1)
         if self._pcar_trigger is not None:
             self._pcar_trigger.reset()
+        self._v_theta_prev = None
+        self._concordance_state = {}
         if self._use_pcar_dual_head and hasattr(self.flow_action_head, "reset"):
             try:
                 self.flow_action_head.reset(batch_size=1)

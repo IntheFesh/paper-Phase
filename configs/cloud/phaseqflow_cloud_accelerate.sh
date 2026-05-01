@@ -50,6 +50,9 @@ CKPT_EVERY="${CKPT_EVERY:-200}"
 DIAG_EVERY="${DIAG_EVERY:-200}"
 KEEP_LAST="${KEEP_LAST:-3}"
 
+# Data root: prefer local cache under $PACE_DATA, fall back to Hub download
+DATA_ROOT="${DATA_ROOT:-${PACE_DATA}/libero_10}"
+
 cd "$PACE_ROOT"
 
 # ------------------------------------------------------------------ manifest
@@ -75,6 +78,7 @@ run_experiment() {
       --diagnostic_log_every "$DIAG_EVERY" \
       --checkpoint_save_every "$CKPT_EVERY" \
       --checkpoint_keep_last "$KEEP_LAST" \
+      --data_root "$DATA_ROOT" \
       "$@" 2>&1 | tee "$log_file"
 
   # Per-experiment artifact tarball.
