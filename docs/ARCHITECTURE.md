@@ -126,13 +126,14 @@ v2 main path.
            │            (PhasePosteriorEstimator, IMPLEMENTED)   │
            │                                                     │
            │  I^(2)  =  -σ_t²    [PolicyVarianceEstimator]       │
-           │            (anchor multi-sample; PENDING)           │
+           │            (BID multi-sample, IMPLEMENTED v2.1)     │
            │                                                     │
            │  I^(3)  =  -||v_θ(c_t) - v_θ(c_{t-1})||²            │
-           │            (VelocityCurvatureEstimator; PENDING)    │
+           │            (VelocityCurvatureEstimator,             │
+           │             cached anchor; IMPLEMENTED v2.1)        │
            │                                                     │
            │  Concordance  C_t  =  1/3 · Σ_k rank_W(I^(k))      │
-           │                       (PENDING; rank-window W=50)   │
+           │                       (rank-window W=50; IMPLEMENTED v2.1) │
            │                                                     │
            │  PCAR trigger:  budget-quantile  τ_t = Q̂_n(1-ε)    │
            │                 replan ⇔ C_t > τ_t                  │
@@ -143,18 +144,16 @@ v2 main path.
                           a_t ∈ R^{Da}   (executed)
 ```
 
-**Implementation status caveat.** Of the three cliff estimators
-only $I^{(1)}$ (Bhattacharyya $\beta_t$) is currently
-implemented end-to-end. The public cliff-namespace functions
-`compute_I_hat_2`, `compute_I_hat_3`, and `compute_concordance_C`
-in
-`lerobot_policy_phaseqflow/phase_centric/cliff_estimators.py`
-raise `NotImplementedError`; their algorithmic details are
-specified below in §3 but the multi-sample anchor mechanism for
-$I^{(2)}$ and the velocity-anchor exposure for $I^{(3)}$ are
-still open. Until those are landed, ablations 03/04/05/07 fall
-back to whichever signal `pcar_input_signal` resolves to inside
-`PCARTrigger` (defaulting to $\beta_t$).
+**Implementation status (v2.1).** All three cliff estimators are now
+implemented end-to-end and exercised by `tests/test_cliff_estimators.py`.
+The public cliff-namespace functions `compute_I_hat_1`,
+`compute_I_hat_2`, `compute_I_hat_3`, and `compute_concordance_C` in
+`lerobot_policy_phaseqflow/phase_centric/cliff_estimators.py` are wired
+into `PhaseQFlowPolicy.forward()`; per-step velocity caching is held in
+`self._v_theta_prev` and concordance buffers in
+`self._concordance_state`, both cleared by `policy.reset()`. The
+`pcar_input_signal` config selects which signal drives the PCAR trigger
+(default `"concordance"` for v2.1).
 
 ### 1.2 Tensor shape table
 
@@ -184,9 +183,9 @@ sizes, $L_{\text{tok}}=16$ T5 token count.
 | L3 | cond vector | $(B, 256)$ | `conditioner([obs ⊕ z^macro ⊕ z^micro])` |
 | L3 | `action_pred` | $(B, 16, 16)$ | 4-NFE shortcut decoding |
 | Cliff | $\beta_t$ | $(B,)$ | $1-\sum_k\sqrt{\hat p_t \hat p_{t-1}}$, micro-level |
-| Cliff | $\sigma_t^2$ | $(B,)$ | per-step ensemble variance (PENDING) |
-| Cliff | $\kappa_t$ | $(B,)$ | velocity-anchor $L^2$ jump (PENDING) |
-| Cliff | $C_t$ | $(B,)$ | rank-window mean of $I^{(1/2/3)}$ (PENDING) |
+| Cliff | $\sigma_t^2$ | $(B,)$ | per-step ensemble variance (`compute_I_hat_2`) |
+| Cliff | $\kappa_t$ | $(B,)$ | velocity-anchor $L^2$ jump (`compute_I_hat_3`) |
+| Cliff | $C_t$ | $(B,)$ | rank-window mean of $I^{(1/2/3)}$ (`compute_concordance_C`) |
 | PCAR | `should_replan` | $(B,)$ bool | scalar threshold check |
 
 ### 1.3 Core module signatures
@@ -230,9 +229,9 @@ class PhasePosteriorEstimator(nn.Module):
 
 # Public cliff-namespace API (phase_centric/cliff_estimators.py)
 def compute_I_hat_1(phase_beta) -> Tensor             # IMPLEMENTED  (= -β_t)
-def compute_I_hat_2(action_samples=None)              # PENDING  (NotImplementedError)
-def compute_I_hat_3(v_theta_ct, v_theta_ct_prev)      # PENDING  (NotImplementedError)
-def compute_concordance_C(i_hat_values, window_size)  # PENDING  (NotImplementedError)
+def compute_I_hat_2(action_samples)                   # IMPLEMENTED  (v2.1)
+def compute_I_hat_3(v_theta_ct, v_theta_ct_prev)      # IMPLEMENTED  (v2.1)
+def compute_concordance_C(i_hat_values, window_size)  # IMPLEMENTED  (v2.1)
 
 class PCARTrigger:                                    # phase_centric/pcar_trigger.py
     history: Deque[float]                              # maxlen=1000
@@ -515,9 +514,9 @@ the actual rate locked to $\epsilon \pm O(1/\sqrt{n})$.
          └───────────┬───────────────────────────────────────────┘
                      │                          (§3 cliff branch)
          ┌───────────┴──────────────────────────────────────────┐
-         │   I^(2) = -σ_t²     (PENDING: variance estimator)    │
-         │   I^(3) = -||Δv||²  (PENDING: curvature estimator)   │
-         │   C_t = ⅓ Σ rank_W(I^(k))  (PENDING: concordance)   │
+         │   I^(2) = -σ_t²     (IMPLEMENTED v2.1: BID variance) │
+         │   I^(3) = -||Δv||²  (IMPLEMENTED v2.1: curvature)    │
+         │   C_t = ⅓ Σ rank_W(I^(k))  (IMPLEMENTED v2.1)       │
          └───────────┬──────────────────────────────────────────┘
                      │ s_t  (= C_t when complete; = β_t today)
            ┌─────────┴──────────┐
@@ -632,7 +631,7 @@ at $\pm 3$-frame tolerance on 50 synthetic demos.
 
 ---
 
-### 3.3 $\hat{I}^{(2)}$ — Action-ensemble variance $\sigma_t^2$ (PENDING)
+### 3.3 $\hat{I}^{(2)}$ — Action-ensemble variance $\sigma_t^2$ (IMPLEMENTED)
 
 **Definition**:
 $\hat I^{(2)}(t) = -\sigma_t^2$, where
@@ -645,21 +644,25 @@ function becomes multi-modal; independent samples spread out and
 variance spikes, signalling a cliff even before the planner's
 phase posterior shifts.
 
-**Pending decision**: the multi-sample anchor needs $N \ge 2$
-parallel flow rollouts per step. The interface (`pcar_input_signal
-= "variance"`) is wired in `PCARTrigger.update_and_check`, but
-`compute_I_hat_2` raises `NotImplementedError` until the
-sampling strategy is resolved.
+**Implementation**: when the BID sampler runs $N \ge 2$ parallel
+flow rollouts, the resulting `bid_chunks` of shape $(N, B, Ta, Da)$
+is passed to `compute_I_hat_2`, which returns the negative mean
+squared deviation per batch element. Wired in
+`PhaseQFlowPolicy.forward()` and surfaced as `preds["I_hat_2"]`.
 
 ```python
 # phase_centric/cliff_estimators.py
-def compute_I_hat_2(action_samples: Tensor) -> Tensor
-#   action_samples: (N, B, Ta, Da) — PENDING
+def compute_I_hat_2(
+    action_samples: Tensor,  # (N, B, Ta, Da), N >= 2
+) -> Tensor                  # (B,), values in (-inf, 0]
 ```
+
+Tests: `test_I_hat_2_shape_and_sign`, `test_I_hat_2_zero_variance`,
+`test_I_hat_2_high_variance_more_negative`, `test_I_hat_2_rejects_low_N`.
 
 ---
 
-### 3.4 $\hat{I}^{(3)}$ — Velocity-field curvature $\kappa_t$ (PENDING)
+### 3.4 $\hat{I}^{(3)}$ — Velocity-field curvature $\kappa_t$ (IMPLEMENTED)
 
 **Definition**:
 $\hat I^{(3)}(t) =
@@ -673,22 +676,27 @@ different phase), then the $L^2$ difference between the velocity
 field at a fixed anchor point detects the transition without
 requiring an ensemble.
 
-**Pending decision**: the anchor $(x_\tau, \tau)$ must be stable
-across steps (e.g. fixed Gaussian noise drawn once per episode);
-exposing the velocity head for two consecutive condition vectors
-adds one extra forward pass per step.
+**Implementation**: `PhaseQFlowPolicy.forward()` evaluates the flow
+head's velocity at a fixed Gaussian anchor `(x_τ=0, τ=0.5)` for
+the current condition vector $c_t$; the previous-step value
+$v_θ(\cdot, c_{t-1})$ is cached in `self._v_theta_prev` (cleared
+by `policy.reset()`). The cliff signal appears as `preds["I_hat_3"]`
+from the second step onward.
 
 ```python
 # phase_centric/cliff_estimators.py
 def compute_I_hat_3(
-    v_theta_ct: Tensor,       # velocity at c_t
-    v_theta_ct_prev: Tensor,  # velocity at c_{t-1}
-) -> Tensor                   # PENDING
+    v_theta_ct: Tensor,       # (B, Ta, Da) — velocity at c_t
+    v_theta_ct_prev: Tensor,  # (B, Ta, Da) — velocity at c_{t-1}
+) -> Tensor                   # (B,), values in (-inf, 0]
 ```
+
+Tests: `test_I_hat_3_shape_and_sign`, `test_I_hat_3_zero_when_identical`,
+`test_I_hat_3_rejects_shape_mismatch`.
 
 ---
 
-### 3.5 Concordance $C_t$ (PENDING)
+### 3.5 Concordance $C_t$ (IMPLEMENTED)
 
 **Definition**: rank-based fusion of the three estimators within
 a rolling window of size $W=50$:
@@ -713,20 +721,35 @@ variance, range $(-\infty, 0]$), and $I^{(3)}$ (negative velocity
 jump, range $(-\infty, 0]$) have incompatible scales. Rank
 normalisation is scale-free and outlier-robust.
 
-**Blocked by**: `compute_I_hat_2` and `compute_I_hat_3` (§3.3,
-§3.4).
+**Implementation**: stateful rolling-window rank fusion. Each call
+takes a sequence of per-batch tensors `[I1, I2, I3]` and an optional
+mutable `_state` dict that persists `_RollingRankBuffer` objects
+across timesteps. The first call seeds the windows; subsequent calls
+push the new value, compute its percentile rank within the window,
+and return the mean rank as `C_t \in [0, 1]`.
+
+In `PhaseQFlowPolicy.forward()`, the policy holds
+`self._concordance_state = {}` (cleared by `policy.reset()`) and
+fuses whichever cliff signals are available at the current step
+(always at least $I^{(1)}$; $I^{(2)}$ when BID sampling is on,
+$I^{(3)}$ from step 2 onward).
 
 ```python
 # phase_centric/cliff_estimators.py
 def compute_concordance_C(
-    i_hat_values: Sequence[Tensor],   # [I1, I2, I3]
+    i_hat_values: Sequence[Tensor],   # [I1, ..., Ik], each (B,)
     window_size: int = 50,
-) -> Tensor                            # PENDING
+    _state: Optional[dict] = None,    # persists across timesteps
+) -> Tensor                            # (B,), values in [0, 1]
 ```
 
-**Config**: `pcar_input_signal = "concordance"` (routes through
-concordance once implemented; falls back to `"beta"` in the
-meantime).
+Tests: `test_concordance_C_in_unit_interval`,
+`test_concordance_C_stateful_window`,
+`test_concordance_C_rejects_empty`,
+`test_concordance_C_rejects_shape_mismatch`.
+
+**Config**: `pcar_input_signal = "concordance"` is the default
+PACE v2 trigger signal; `"beta"` is kept as a legacy fallback.
 
 ---
 
@@ -871,31 +894,17 @@ architecture from `configs/train/02_train_phase_and_flow.yaml`
 | `06_oracle_cliff.yaml` | — | — | — | — | — | Oracle gripper-flip signal: upper bound |
 | `07_cliff_concordance_with_boundary_reweight.yaml` | ✓ | ✓ | ✓ | ✓ | ✓ | **Full PACE v2** (paper headline) |
 
-**v2.0 runnable configs**: 01, 02, 06, 07 (I^(1) = Bhattacharyya β_t is fully implemented).
+**v2.1 runnable configs**: all seven (01, 02, 03, 04, 05, 06, 07).
+All three cliff estimators (`compute_I_hat_1`, `compute_I_hat_2`,
+`compute_I_hat_3`) plus `compute_concordance_C` are wired through
+`PhaseQFlowPolicy.forward()`; `pcar_input_signal` selects between
+`"beta"` / `"variance"` / `"curvature"` / `"concordance"` to drive
+the PCAR trigger. Each config produces a scientifically distinct
+result and contributes a unique row to the IQM table.
 
-**Disabled configs (v2.0)**:
-
-- **Config 03** (`cliff_via_var_only`): `compute_I_hat_2` raises `NotImplementedError`.
-  Setting `pcar_input_signal="variance"` does not currently invoke
-  `PolicyVarianceEstimator.estimate()` anywhere in the training loop.
-  Behavior: identical to config 01 (no cliff detection active).
-
-- **Config 04** (`cliff_via_curvature_only`): `compute_I_hat_3` raises `NotImplementedError`.
-  `VelocityCurvatureEstimator.update()` is implemented in the cliff_detection subpackage
-  but not wired into `PhaseQFlowPolicy.forward()`.
-  Behavior: identical to config 01 (no cliff detection active).
-
-- **Config 05** (`cliff_concordance`): Concordance C_t requires all three estimators.
-  With I^(2) and I^(3) unavailable, `pcar_input_signal="concordance"` in `PCARTrigger`
-  falls back to beta_t. Behavior: nearly identical to config 02.
-
-**Target for v2.1**: Wire `PolicyVarianceEstimator` and `VelocityCurvatureEstimator`
-into `PhaseQFlowPolicy.forward()`, expose their outputs in `preds` dict,
-and route through `PCARTrigger.update_and_check()`.
-
-In the meantime the ablation dry-run pipeline (`--dry_run`) uses
-synthetic data to verify that the configuration wiring and
-statistical aggregation are correct end-to-end.
+The ablation dry-run pipeline (`scripts/aggregate_ablation.py --dry_run`)
+remains available to validate the configuration wiring and statistical
+aggregation pipeline without GPU.
 
 **Seed choice**: $\{42,\ 123,\ 2024\}$.
 

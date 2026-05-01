@@ -605,7 +605,11 @@ def main(argv: List[str] | None = None) -> int:
     if args.output_dir is not None:
         print(f"[train_local] output_dir = {args.output_dir}")
 
-    # Try to build real dataloader; fall back to dummy batches on failure.
+    # When --data_root is provided, the real LeRobotDataset path is REQUIRED.
+    # No silent fallback to dummy batches: production runs must train on real
+    # LIBERO data, and accidental dummy training would silently invalidate
+    # weeks of eval. Set PACE_ALLOW_DUMMY_FALLBACK=1 only when explicitly
+    # debugging.
     real_loader = None
     real_processor = None
     if data_root is not None:
@@ -614,9 +618,17 @@ def main(argv: List[str] | None = None) -> int:
             real_loader = dl_info["loader"]
             real_processor = dl_info["processor"]
             print(f"[train_local] real dataloader: {data_root}")
-        except (ImportError, Exception) as exc:
-            print(f"[train_local] WARNING: could not build real dataloader ({exc!r}); "
-                  "falling back to dummy batches.")
+        except Exception as exc:  # noqa: BLE001
+            if os.environ.get("PACE_ALLOW_DUMMY_FALLBACK") == "1":
+                print(f"[train_local] WARNING: could not build real dataloader "
+                      f"({exc!r}); PACE_ALLOW_DUMMY_FALLBACK=1 set, using dummy batches.")
+            else:
+                raise RuntimeError(
+                    f"--data_root {data_root!r} was given but the real "
+                    f"LeRobotDataset could not be constructed: {exc!r}. "
+                    "Set PACE_ALLOW_DUMMY_FALLBACK=1 to opt into dummy-batch "
+                    "fallback for debugging only."
+                ) from exc
 
     policy = PhaseQFlowPolicy(cfg).to(device).train()
     _ = policy.compute_loss(_make_dummy_batch(cfg, args.micro_batch, device))
@@ -768,13 +780,20 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.output_dir is not None:
         out_dir = Path(args.output_dir)
-        _write_eval_results(
-            output_dir=out_dir,
-            mode=args.phase_centric_mode,
-            seed=int(args.seed),
-            total_steps=total_steps,
-            loss_history=loss_history,
-        )
+        # Only write the placeholder eval_results.json when training on dummy
+        # batches. With real data, the GPU eval harness (run_eval_libero.sh)
+        # is responsible for producing the real eval_results.json — writing
+        # a placeholder here would silently shadow the real numbers.
+        if real_loader is None:
+            _write_eval_results(
+                output_dir=out_dir,
+                mode=args.phase_centric_mode,
+                seed=int(args.seed),
+                total_steps=total_steps,
+                loss_history=loss_history,
+            )
+        else:
+            print("[train_local] real-data run: eval_results.json deferred to LIBERO eval harness")
         print(f"[train_local] wrote {out_dir / 'eval_results.json'}")
     return 0
 

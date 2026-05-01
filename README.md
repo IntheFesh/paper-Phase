@@ -25,12 +25,12 @@
 | $\hat I^{(1)}$ Bhattacharyya $\beta_t$ | **verified** (CPU) | `verify_phase_posterior.py` peak-F1 $\ge 0.5$ |
 | PCAR budget-quantile DKW bound | **verified** (CPU) | `verify_pcar_budget.py` $\|\text{rate}-\epsilon\|<0.005$ |
 | Boundary-aware flow loss reduction | **verified** (CPU) | `sanity_pace_a.py` $\ge 20\%$ FM drop |
-| Unit + smoke tests | **verified** (CPU) | `pytest tests/` → 204 passed |
-| $\hat I^{(2)}$ Action variance | **pending** | `compute_I_hat_2` raises `NotImplementedError`; Ablation 03 **disabled** (placeholder only) |
-| $\hat I^{(3)}$ Velocity curvature | **pending** | `compute_I_hat_3` raises `NotImplementedError`; Ablation 04 **disabled** (placeholder only) |
-| Concordance $C_t$ rank fusion | **pending** | blocked on I^(2) and I^(3); Ablation 05 shows **partial** result (I^(1) only) |
+| Unit + smoke tests | **verified** (CPU) | `pytest tests/` → 212 passed (v2.1) |
+| $\hat I^{(2)}$ Action variance | **verified** (CPU) | `compute_I_hat_2` implemented; tests in `test_cliff_estimators.py` |
+| $\hat I^{(3)}$ Velocity curvature | **verified** (CPU) | `compute_I_hat_3` implemented; cached `c_{t-1}` cleared by `policy.reset()` |
+| Concordance $C_t$ rank fusion | **verified** (CPU) | `compute_concordance_C` rolling-window rank fusion; tests cover [0,1] range and online state |
 | LIBERO-Long / Spatial SR (Tables 1, 2) | **placeholder** | requires GPU + LIBERO dataset + trained checkpoint |
-| Phenomenon §6.1–6.5 numbers | **placeholder** | requires LIBERO rollouts; current numbers from `--dry_run` |
+| Phenomenon §6.1, §6.4 numbers | **placeholder** | dry-run pipeline; full results require real env + checkpoints |
 | Inference cost (params, NFE, latency) | **placeholder** | parameter count and NFE are correct per architecture; latency requires real GPU benchmark |
 
 This environment is CPU-only with no LIBERO/SimplerEnv installed and
@@ -100,25 +100,24 @@ IQM ± 95% bootstrap CI (rliable-style).
 > measurements. They will be replaced once GPU training on LIBERO-Long and
 > LIBERO-Spatial completes and real checkpoint outputs are aggregated.
 
-> **Implementation gap (v2.0)**: Configs 03, 04, and 05 are **disabled** in the
-> current release. `compute_I_hat_2` (action variance) and `compute_I_hat_3`
-> (velocity curvature) raise `NotImplementedError`. Config 05 (concordance)
-> falls back to `beta_t` alone, making it effectively identical to config 02.
-> Only configs **01, 02, 06, 07** produce scientifically distinct results.
-> Configs 03/04/05 will be re-enabled in v2.1.
+> **v2.1 status**: All seven configs are now scientifically distinct. The
+> previously-disabled cliff estimators are wired through:
+> `compute_I_hat_2` (action variance), `compute_I_hat_3` (velocity curvature),
+> and `compute_concordance_C` (rank-window fusion) are implemented and exercised
+> by `tests/test_cliff_estimators.py`.
 
-| Config | Description | LIBERO-Long IQM (†placeholder) | LIBERO-Spatial IQM (†placeholder) |
-|--------|-------------|:------------------------------:|:----------------------------------:|
+| Config | Description | LIBERO-Long IQM (placeholder) | LIBERO-Spatial IQM (placeholder) |
+|--------|-------------|:-----------------------------:|:--------------------------------:|
 | 01 | BC-Chunked (baseline) | 0.520 | 0.634 |
 | 02 | Cliff via β̂_t only (I^(1)) | 0.593 | 0.690 |
-| 03† | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
-| 04† | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
-| 05† | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
+| 03 | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
+| 04 | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
+| 05 | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
 | 06 | Oracle cliff (upper bound) | 0.746 | 0.781 |
 | **07** | **PACE v2: C_t + boundary reweight** | **0.692** | **0.727** |
 
-† Results marked with † are **placeholder values** (configs disabled due to
-  `NotImplementedError`). See Implementation Status table for details.
+All numbers above are synthetic dry-run placeholders pending the full
+LIBERO-Long / LIBERO-Spatial GPU sweep.
 
 ```bash
 # Verify pipeline (synthetic data, no checkpoint):
