@@ -57,11 +57,16 @@ sub()   { printf "${CYAN}--- %s${RESET}\n" "$*"; }
 : "${HF_HOME:=/root/autodl-tmp/hf_cache}"
 : "${DATA_ROOT:=${PACE_DATA}/libero_10}"
 : "${DATASET_REPO_ID:=HuggingFaceVLA/libero}"
+# Conservative safe defaults; autobatch will normally override with the
+# largest size that fits the actual GPU at runtime.
 : "${BATCH_SIZE:=32}"
 : "${GRAD_ACCUM:=32}"
 
 export PACE_ROOT PACE_DATA PACE_CKPT PACE_OUT PACE_SNAPSHOT_DIR
 export HF_HOME DATA_ROOT DATASET_REPO_ID BATCH_SIZE GRAD_ACCUM
+
+CLOUD_SCRIPT="configs/cloud/phaseqflow_cloud_accelerate.sh"
+export CLOUD_SCRIPT
 
 # Help / usage path — print and exit before touching dirs (so --help works anywhere).
 case "$PHASE_ARG" in
@@ -76,14 +81,17 @@ Phases:
   tests      — Phase 4 only (pytest + smoke + 4 math + GPU 1-step)
   autobatch  — Phase 4b only (auto-tune BATCH_SIZE for the current GPU)
   coverage   — Phase 5 only (coverage report)
-  train      — Phase 6 (12+ days; launches the H800 sweep — wrap in tmux)
+  train      — Phase 6 (~6–8 days on RTX PRO 6000 96GB; wrap in tmux)
   post       — Phase 8 (aggregate + 5 figures + final snapshot)
   all        — Phase 2 → 8 (with 10s abort window before Phase 6)
 
 Environment:
-  PACE_ROOT (default /root/paper-Phase), PACE_DATA, PACE_OUT, PACE_SNAPSHOT_DIR
-  DATA_ROOT (default $PACE_DATA/libero_10), DATASET_REPO_ID
-  BATCH_SIZE (default 32), GRAD_ACCUM (default 32)
+  PACE_ROOT      default /root/paper-Phase
+  PACE_DATA, PACE_OUT, PACE_SNAPSHOT_DIR
+  DATA_ROOT      default $PACE_DATA/libero_10
+  DATASET_REPO_ID
+  BATCH_SIZE     default 32 (autobatch normally overrides this; force a value with SKIP_AUTOBATCH=1)
+  GRAD_ACCUM     default 32 (autobatch picks GRAD_ACCUM so BATCH_SIZE × GRAD_ACCUM ≈ 1024)
   AUTOBATCH_CANDIDATES, AUTOBATCH_TARGET_EFFECTIVE, AUTOBATCH_SAFETY
   SKIP_PYTEST=1, SKIP_GPU_STEP=1, SKIP_AUTOBATCH=1, ALLOW_NO_TMUX=1
 EOF
@@ -391,6 +399,7 @@ phase_6_train() {
 
   echo
   echo "  Effective config:"
+  echo "    CLOUD_SCRIPT       = $CLOUD_SCRIPT"
   echo "    PACE_ROOT          = $PACE_ROOT"
   echo "    DATA_ROOT          = $DATA_ROOT"
   echo "    PACE_OUT           = $PACE_OUT"
@@ -398,7 +407,7 @@ phase_6_train() {
   echo "    BATCH_SIZE         = $BATCH_SIZE  (× GRAD_ACCUM=$GRAD_ACCUM = effective $((BATCH_SIZE * GRAD_ACCUM)))"
   echo
 
-  bash configs/cloud/phaseqflow_cloud_accelerate.sh 2>&1 | tee "$LOG"
+  bash "$CLOUD_SCRIPT" 2>&1 | tee "$LOG"
 }
 
 
@@ -530,7 +539,7 @@ Phases:
   tests      — Phase 4 only (pytest + smoke + 4 math + GPU 1-step)
   autobatch  — Phase 4b only (auto-tune BATCH_SIZE for the current GPU)
   coverage   — Phase 5 only (coverage report)
-  train      — Phase 6 (12+ days; launches the H800 sweep — wrap in tmux)
+  train      — Phase 6 (~6–8 days on RTX PRO 6000 96GB; wrap in tmux)
   post       — Phase 8 (aggregate + 5 figures + final snapshot)
   all        — Phase 2 → 8 (with 10s abort window before Phase 6)
 

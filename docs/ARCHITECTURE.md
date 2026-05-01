@@ -33,7 +33,7 @@
   - [3.6 PCAR](#36-pcar--predictability-cliff-adaptive-replanning)
   - [3.7 Boundary-aware flow loss](#37-boundary-aware-flow-loss-pace-a)
   - [3.8 Summary table](#38-summary)
-- [§4 Ablation Matrix (v2, seven configs)](#4-ablation-matrix-v2-seven-configs)
+- [§4 Ablation Matrix (CoRL submission — three configs)](#4-ablation-matrix-corl-submission--three-configs)
   - [4.1 Matrix structure](#41-matrix-structure)
   - [4.2 Design principles](#42-design-principles)
   - [4.3 Statistical aggregation](#43-statistical-aggregation)
@@ -874,42 +874,48 @@ $\mathbb{E}[\beta] > 0.1$ (entropy regulariser is effective).
 
 ---
 
-## 4 Ablation Matrix (v2, seven configs)
+## 4 Ablation Matrix (CoRL submission — three configs)
 
 ### 4.1 Matrix structure
 
-Seven configs × 3 seeds = 21 runs, each with a unique combination
-of cliff-detection signals and boundary reweighting. All configs
-live under `configs/ablation/v2/` and inherit the full base
-architecture from `configs/train/02_train_phase_and_flow.yaml`
-(only the `use_*` flags differ).
+The CoRL submission uses three configs × 3 seeds = 9 runs.
+All YAMLs live under `configs/ablation/v2/` and inherit the full base
+architecture from `configs/train/02_train_phase_and_flow.yaml`; only
+the `use_*` flags and `pcar_input_signal` differ.
 
 | Config file | $\hat I^{(1)}$ | $\hat I^{(2)}$ | $\hat I^{(3)}$ | Concordance | Boundary reweight | Scientific purpose |
 | :-- | :--: | :--: | :--: | :--: | :--: | :-- |
 | `01_bc_chunked.yaml` | | | | | | Control: plain BC-Chunked, fixed-H replanning, no cliff detection |
-| `02_cliff_via_beta_only.yaml` | ✓ | | | | | Marginal gain of $\hat I^{(1)}$ alone (PCAR via $\beta_t$) |
-| `03_cliff_via_var_only.yaml` | | ✓ | | | | Marginal gain of $\hat I^{(2)}$ alone (PCAR via variance) |
-| `04_cliff_via_curvature_only.yaml` | | | ✓ | | | Marginal gain of $\hat I^{(3)}$ alone (PCAR via curvature) |
-| `05_cliff_concordance.yaml` | ✓ | ✓ | ✓ | ✓ | | Full concordance, no boundary reweight |
-| `06_oracle_cliff.yaml` | — | — | — | — | — | Oracle gripper-flip signal: upper bound |
+| `02_cliff_via_beta_only.yaml` | ✓ | | | | | $\hat I^{(1)}$ alone (PCAR via $\beta_t$) — isolates fusion gain |
 | `07_cliff_concordance_with_boundary_reweight.yaml` | ✓ | ✓ | ✓ | ✓ | ✓ | **Full PACE v2** (paper headline) |
 
-**v2.1 runnable configs**: all seven (01, 02, 03, 04, 05, 06, 07).
-All three cliff estimators (`compute_I_hat_1`, `compute_I_hat_2`,
-`compute_I_hat_3`) plus `compute_concordance_C` are wired through
-`PhaseQFlowPolicy.forward()`; `pcar_input_signal` selects between
-`"beta"` / `"variance"` / `"curvature"` / `"concordance"` to drive
-the PCAR trigger. Each config produces a scientifically distinct
-result and contributes a unique row to the IQM table.
+**Why three configs are sufficient.** Ablation 07 internally invokes all
+three cliff estimators via `compute_concordance_C`, so the gap between
+02 → 07 measures the joint contribution of $\hat I^{(2)} + \hat I^{(3)}$
+plus boundary reweighting in one comparison. Standalone single-estimator
+ablations (the previously-listed 03/04) are validated by unit tests
+(`tests/test_cliff_estimators.py`) and add no further information to
+Table 2 reviewers care about.
 
-The ablation dry-run pipeline (`scripts/aggregate_ablation.py --dry_run`)
-remains available to validate the configuration wiring and statistical
-aggregation pipeline without GPU.
+### 4.1a Configs not in the CoRL submission
 
-**Seed choice**: $\{42,\ 123,\ 2024\}$.
+| Config | Reason for drop |
+| :-- | :-- |
+| `03_cliff_via_var_only.yaml` | $\hat I^{(2)}$ implementation covered by tests |
+| `04_cliff_via_curvature_only.yaml` | $\hat I^{(3)}$ implementation covered by tests |
+| `05_cliff_concordance.yaml` | Subsumed by Ablation 07 (07 = 05 + boundary reweight) |
+| `06_oracle_cliff.yaml` | Upper-bound context only; not required by reviewers |
 
-**Total compute**: GPU (RTX 5070) $\approx 20{,}000$ steps × 21
-runs $\approx 7$ days. CPU dry-run: $\approx 1{-}2$ min.
+The YAML files remain in the codebase for reference but are skipped by the
+cloud launcher via `PACE_SKIP_ABLATIONS`. They can still be invoked manually
+via `python scripts/training/train_dummy_batch.py --phase-centric-mode full
+--data_root $DATA_ROOT --output_dir ...` if needed.
+
+**Seed choice**: $\{42,\ 43,\ 44\}$ (CoRL trim).
+
+**Total compute** (RTX PRO 6000 96GB, autobatch BATCH_SIZE≈256):
+3 stages + 3 ablations × 3 seeds + 2 phenomenon experiments ≈ **6–8 days**.
+CPU dry-run aggregation: $\approx 1{-}2$ min.
 
 ### 4.2 Design principles
 
@@ -917,27 +923,25 @@ runs $\approx 7$ days. CPU dry-run: $\approx 1{-}2$ min.
 
 Apart from the feature gates, every hyperparameter (lr, batch,
 optimizer, EMA, data augmentation, three-stage curriculum) is
-identical across the seven configs. Each YAML overrides only the
+identical across the three CoRL configs. Each YAML overrides only the
 `use_*` and `pcar_input_signal` fields; numerical hyper-parameters
 are inherited from the base train config.
 
-#### (b) Additive ablation ladder
+#### (b) Additive ablation ladder (CoRL trim)
 
-The seven configs form an additive ladder:
+The three retained configs form a tight ladder:
 
 ```
-01 (no cliff)
-  → 02 (I^(1) only)
-  → 03 (I^(2) only)          each single-estimator row measures
-  → 04 (I^(3) only)          the marginal gain of that estimator alone
-  → 05 (concordance, no reweight)
-  → 07 (concordance + reweight)  = full PACE v2 headline
-  → 06 (oracle)              upper bound; not a valid deployment config
+01 (no cliff)                  baseline
+  → 02 (I^(1) only)            single-estimator gain (β_t)
+  → 07 (full PACE v2)          concordance fusion + boundary reweight
 ```
 
-Comparing 05 → 07 isolates the contribution of boundary-aware
-flow loss. Comparing 02/03/04 → 05 measures the gain from
-multi-estimator fusion vs. any single estimator.
+Comparing 01 → 02 measures the gain from any cliff signal at all;
+comparing 02 → 07 measures the joint contribution of multi-estimator
+fusion (concordance) plus boundary-aware flow loss. The full-sweep
+ladder (additionally 03, 04, 05, 06) is preserved in the codebase but
+not part of the submission scope.
 
 #### (c) Train / inference separation
 

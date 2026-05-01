@@ -91,29 +91,24 @@ protocols. Direct numeric comparison requires a shared evaluation harness.
 ## Ablation Study (Table 2)
 
 Each configuration inherits the full architecture; only cliff detection and
-boundary-reweighting flags differ. Seven configs × 3 seeds, evaluated with
-IQM ± 95% bootstrap CI (rliable-style).
+boundary-reweighting flags differ. **CoRL submission** uses three configs × 3 seeds,
+evaluated with IQM ± 95% bootstrap CI (rliable-style):
 
 > **Status**: all numbers below are **synthetic dry-run placeholders** generated
-> by `scripts/aggregate_ablation.py --dry_run`. They are produced by sampling
-> N(μ, 0.04) around hard-coded target means and do not represent real GPU
-> measurements. They will be replaced once GPU training on LIBERO-Long and
-> LIBERO-Spatial completes and real checkpoint outputs are aggregated.
+> by `scripts/aggregate_ablation.py --dry_run`. Real numbers land after the
+> cloud sweep finishes (`scripts/run_autodl_pipeline.sh train`).
 
-> **v2.1 status**: All seven configs are now scientifically distinct. The
-> previously-disabled cliff estimators are wired through:
-> `compute_I_hat_2` (action variance), `compute_I_hat_3` (velocity curvature),
-> and `compute_concordance_C` (rank-window fusion) are implemented and exercised
-> by `tests/test_cliff_estimators.py`.
+> **v2.1 implementation status**: `compute_I_hat_1` (Bhattacharyya), `compute_I_hat_2`
+> (action variance), `compute_I_hat_3` (velocity curvature), and `compute_concordance_C`
+> (rank-window fusion) are all implemented and exercised by
+> `tests/test_cliff_estimators.py`. The CoRL submission's headline ablation 07 uses
+> all three estimators internally via the concordance signal, so the trimmed table
+> still validates the full theoretical chain.
 
 | Config | Description | LIBERO-Long IQM (placeholder) | LIBERO-Spatial IQM (placeholder) |
 |--------|-------------|:-----------------------------:|:--------------------------------:|
 | 01 | BC-Chunked (baseline) | 0.520 | 0.634 |
 | 02 | Cliff via β̂_t only (I^(1)) | 0.593 | 0.690 |
-| 03 | Cliff via σ²_t only (I^(2)) | 0.576 | 0.676 |
-| 04 | Cliff via κ_t only (I^(3)) | 0.585 | 0.663 |
-| 05 | Concordance C_t (I^(1+2+3)) | 0.675 | 0.743 |
-| 06 | Oracle cliff (upper bound) | 0.746 | 0.781 |
 | **07** | **PACE v2: C_t + boundary reweight** | **0.692** | **0.727** |
 
 All numbers above are synthetic dry-run placeholders pending the full

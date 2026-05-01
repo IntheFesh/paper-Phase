@@ -155,8 +155,10 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--candidates",
         type=int,
         nargs="+",
-        default=[128, 96, 64, 48, 32, 24, 16, 12, 8, 6, 4],
-        help="Descending list of micro-batch sizes to probe.",
+        default=[384, 256, 192, 128, 96, 64, 48, 32, 24, 16, 12, 8, 6, 4],
+        help="Descending list of micro-batch sizes to probe. The default starts "
+             "high (384) so 96GB-class cards (RTX PRO 6000, H200, B200) can pick "
+             "their natural batch size; smaller cards still settle to a fitting one.",
     )
     p.add_argument(
         "--n_steps", type=int, default=3,
