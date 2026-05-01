@@ -247,7 +247,11 @@ phase_4_preflight() {
   fi
 
   sub "smoke_phase_centric.sh  (expect 7/7)"
-  bash scripts/smoke/smoke_phase_centric.sh 2>&1 | tail -3
+  if [[ -f "scripts/smoke/smoke_phase_centric.sh" ]]; then
+    bash scripts/smoke/smoke_phase_centric.sh 2>&1 | tail -3
+  else
+    warn "scripts/smoke/smoke_phase_centric.sh not found — skipping (run: git reset --hard origin/$(git rev-parse --abbrev-ref HEAD))"
+  fi
 
   sub "CPU math: phase_posterior / pace_a / pcar_budget / identifiability"
   python scripts/verification/verify_phase_posterior.py 2>&1 | tail -2
