@@ -53,7 +53,26 @@ KEEP_LAST="${KEEP_LAST:-3}"
 # Data root: prefer local cache under $PACE_DATA, fall back to Hub download
 DATA_ROOT="${DATA_ROOT:-${PACE_DATA}/libero_10}"
 
+# Effective batch = BATCH_SIZE * GRAD_ACCUM. H800 (80GB) typically fits
+# BATCH_SIZE=32 with PACE v2 footprint; raise GRAD_ACCUM to keep effective
+# batch size at the paper-default 1024.
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
+
 cd "$PACE_ROOT"
+
+# ------------------------------------------------------------------ data preflight
+if [[ ! -d "$DATA_ROOT" ]]; then
+  echo "[ERROR] DATA_ROOT not found: $DATA_ROOT" >&2
+  echo "  Expected a LeRobot-format LIBERO dataset directory." >&2
+  echo "  Either:" >&2
+  echo "    - Set DATA_ROOT to a local cache, or" >&2
+  echo "    - Set DATASET_REPO_ID and let the trainer pull from HuggingFace Hub" >&2
+  echo "      (in which case unset DATA_ROOT or point it to a writable cache dir)." >&2
+  if [[ -z "${PACE_ALLOW_MISSING_DATA:-}" ]]; then
+    exit 1
+  fi
+  echo "[WARN] PACE_ALLOW_MISSING_DATA set; continuing without local data" >&2
+fi
 
 # ------------------------------------------------------------------ manifest
 echo "[RUN_DIR] $PACE_RUN_DIR"
@@ -87,6 +106,37 @@ run_experiment() {
       --dst "$PACE_SNAPSHOT_DIR/${name//\//_}_$(date +%Y%m%d_%H%M%S).tar.gz" || true
 }
 
+run_stage() {
+  # Three-stage main training: dispatches via scripts/train.py to honor stage YAMLs.
+  # Args:
+  #   $1 — short name (stage1_pretrain | stage2_phase_flow | stage3_finetune)
+  #   $2 — stage YAML (configs/train/01_pretrain_multimodal.yaml etc.)
+  #   $3 — total steps
+  #   $4 — optional checkpoint path to resume from
+  local name="$1"; local stage_yaml="$2"; local steps="$3"; local resume="${4:-}"
+  local exp_dir="$PACE_RUN_DIR/$name"
+  local log_file="$PACE_RUN_DIR/logs/${name}.log"
+  mkdir -p "$exp_dir"
+  echo "[RUN_DIR] $exp_dir"
+  echo "[STARTING] $name (stage YAML: $stage_yaml)"
+  local resume_flag=()
+  if [[ -n "$resume" ]]; then
+    resume_flag=(--resume_from_checkpoint "$resume")
+  fi
+  python scripts/train.py \
+      --stage "$stage_yaml" \
+      --data_root "$DATA_ROOT" \
+      --max_steps "$steps" \
+      --device cuda --seed 0 \
+      --output_dir "$exp_dir" \
+      --micro_batch "$BATCH_SIZE" \
+      "${resume_flag[@]}" 2>&1 | tee "$log_file"
+
+  python scripts/utils/snapshot_experiment.py \
+      --src "$exp_dir" \
+      --dst "$PACE_SNAPSHOT_DIR/${name}_$(date +%Y%m%d_%H%M%S).tar.gz" || true
+}
+
 skipped() {
   echo "[SKIP] $1 — reason: $2"
 }
@@ -106,27 +156,27 @@ dryrun_stub() {
 }
 
 # ============================================================================
-# 1. Three-stage main training
+# 1. Three-stage main training (dispatched via scripts/train.py + stage YAML)
 # ============================================================================
-run_experiment "stage1_pretrain" \
-    --phase-centric-mode off \
-    --steps "$STAGE1_STEPS" \
-    --device cuda --seed 0 \
-    --micro-batch "$BATCH_SIZE"
+run_stage "stage1_pretrain" \
+    "configs/train/01_pretrain_multimodal.yaml" \
+    "$STAGE1_STEPS"
 
-run_experiment "stage2_phase_flow" \
-    --phase-centric-mode a \
-    --steps "$STAGE2_STEPS" \
-    --device cuda --seed 0 \
-    --micro-batch "$BATCH_SIZE" \
-    --resume_from_checkpoint "$PACE_RUN_DIR/stage1_pretrain"
+run_stage "stage2_phase_flow" \
+    "configs/train/02_train_phase_and_flow.yaml" \
+    "$STAGE2_STEPS" \
+    "$PACE_RUN_DIR/stage1_pretrain"
 
-run_experiment "stage3_finetune" \
-    --phase-centric-mode pcar \
-    --steps "$STAGE3_STEPS" \
-    --device cuda --seed 0 \
-    --micro-batch "$BATCH_SIZE" \
-    --resume_from_checkpoint "$PACE_RUN_DIR/stage2_phase_flow"
+run_stage "stage3_finetune" \
+    "configs/train/03_finetune_replan.yaml" \
+    "$STAGE3_STEPS" \
+    "$PACE_RUN_DIR/stage2_phase_flow"
+
+# Final-stage checkpoint deserves a fat snapshot (includes model.safetensors).
+python scripts/utils/snapshot_experiment.py \
+    --src "$PACE_RUN_DIR/stage3_finetune" \
+    --dst "$PACE_SNAPSHOT_DIR/stage3_finetune_full_$(date +%Y%m%d_%H%M%S).tar.gz" \
+    --include_checkpoints || true
 
 # ============================================================================
 # 2. Ablation matrix
