@@ -69,6 +69,10 @@ if str(_PKG_SRC) not in sys.path:
 
 from lerobot_policy_phaseqflow.configuration_phaseqflow import PhaseQFlowConfig # noqa: E402
 from lerobot_policy_phaseqflow.modeling_phaseqflow import PhaseQFlowPolicy # noqa: E402
+from lerobot_policy_phaseqflow.utils import (  # noqa: E402
+    CheckpointManager,
+    DiagnosticLogger,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("train_local")
@@ -291,6 +295,47 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-batch", type=int, default=2,
                         help="per-step dummy batch size.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to a checkpoint .pt file (or a directory containing "
+            "checkpoint_latest.pt). Resumes optimizer state, step counter, "
+            "and RNG state for bit-identical continuation."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint_save_every",
+        type=int,
+        default=200,
+        help="Cadence (in steps) at which checkpoints are written.",
+    )
+    parser.add_argument(
+        "--checkpoint_keep_last",
+        type=int,
+        default=3,
+        help="Rolling window: number of recent checkpoints retained on disk.",
+    )
+    parser.add_argument(
+        "--diagnostic_log_every",
+        type=int,
+        default=200,
+        help="Cadence (in steps) at which training_dynamics.csv is appended.",
+    )
+    parser.add_argument(
+        "--enable_diagnostics",
+        action="store_true",
+        help=(
+            "Enable DiagnosticLogger (writes training_dynamics.csv into "
+            "--output_dir at --diagnostic_log_every cadence)."
+        ),
+    )
+    parser.add_argument(
+        "--enable_checkpointing",
+        action="store_true",
+        help="Enable CheckpointManager (rolling --checkpoint_keep_last writes).",
+    )
 
     from lerobot.configs.policies import PreTrainedConfig as _PTC
 
@@ -509,15 +554,43 @@ def main(argv: List[str] | None = None) -> int:
         curriculum = PhaseDensityCurriculum(cfg=cfg)
         print(f"[train_local] PACE-C curriculum enabled: {curriculum.describe()}")
 
+    out_dir_path = Path(args.output_dir) if args.output_dir is not None else None
+
+    diagnostic_logger: DiagnosticLogger | None = None
+    if args.enable_diagnostics:
+        if out_dir_path is None:
+            raise ValueError("--enable_diagnostics requires --output_dir")
+        diagnostic_logger = DiagnosticLogger(out_dir_path, log_every_n_steps=args.diagnostic_log_every)
+
+    ckpt_manager: CheckpointManager | None = None
+    if args.enable_checkpointing or args.resume_from_checkpoint:
+        if out_dir_path is None:
+            raise ValueError("--enable_checkpointing requires --output_dir")
+        ckpt_manager = CheckpointManager(
+            out_dir_path,
+            save_every_n_steps=args.checkpoint_save_every,
+            keep_last=args.checkpoint_keep_last,
+        )
+
+    start_step = 0
+    if args.resume_from_checkpoint:
+        if ckpt_manager is None:
+            ckpt_manager = CheckpointManager(out_dir_path or Path(args.resume_from_checkpoint).parent)
+        start_step = ckpt_manager.load(
+            args.resume_from_checkpoint, policy, optimizer, scheduler=None
+        )
+        print(f"[train_local] resumed from {args.resume_from_checkpoint} at step {start_step}")
+
     loss_history: List[float] = []
     t0 = time.perf_counter()
-    for step in range(total_steps):
+    for step in range(start_step, total_steps):
+        step_t0 = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         batch = _make_dummy_batch(cfg, args.micro_batch, device)
         out = policy.compute_loss(batch, return_dict=True)
         loss = out["loss"]
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             [p for p in policy.parameters() if p.requires_grad and p.grad is not None],
             max_norm=float(cfg.grad_clip_norm),
         )
@@ -533,12 +606,62 @@ def main(argv: List[str] | None = None) -> int:
             stage_msg = ""
         loss_val = float(loss.detach().item())
         loss_history.append(loss_val)
+        step_time_sec = time.perf_counter() - step_t0
         print_every = max(1, total_steps // 20)
-        if (step + 1) % print_every == 0 or step == 0 or step == total_steps - 1:
+        if (step + 1) % print_every == 0 or step == start_step or step == total_steps - 1:
             print(f" step {step + 1}/{total_steps} loss={loss_val:.4f}{stage_msg}")
 
+        if diagnostic_logger is not None and diagnostic_logger.should_log(step):
+            losses_dict = {
+                "loss_total": loss_val,
+                "loss_imitation": out.get("loss_imitation"),
+                "loss_flow_policy": out.get("loss_flow_policy"),
+                "loss_infonce_macro": out.get("loss_infonce_macro"),
+                "loss_infonce_micro": out.get("loss_infonce_micro"),
+            }
+            grad_norms = {"total": float(grad_norm) if grad_norm is not None else float("nan")}
+            phase_stats = {
+                "pace_a_mean_beta": out.get("pace_a_mean_beta"),
+                "pace_a_max_beta": out.get("pace_a_max_beta"),
+                "pace_a_boundary_density": out.get("pace_a_boundary_density"),
+                "entropy_macro": out.get("phase_posterior_entropy_macro"),
+                "entropy_micro": out.get("phase_posterior_entropy_micro"),
+            }
+            pcar_stats = {
+                "trigger_rate": out.get("pcar_trigger_rate"),
+                "mean_concordance": out.get("pcar_mean_concordance"),
+            }
+            gpu_mem = (
+                torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else float("nan")
+            )
+            diagnostic_logger.record(
+                step=step,
+                losses=losses_dict,
+                grad_norms=grad_norms,
+                phase_stats=phase_stats,
+                pcar_stats=pcar_stats,
+                lr=optimizer.param_groups[0]["lr"],
+                gpu_memory_gb=gpu_mem,
+                step_time_sec=step_time_sec,
+            )
+
+        if ckpt_manager is not None and ckpt_manager.should_save(step + 1):
+            ckpt_manager.save(step + 1, policy, optimizer, extra={"mode": args.phase_centric_mode})
+
     elapsed = time.perf_counter() - t0
-    print(f"[train_local] DONE ({elapsed:.2f}s, {total_steps} steps)")
+    print(f"[train_local] DONE ({elapsed:.2f}s, {total_steps - start_step} steps)")
+
+    if diagnostic_logger is not None:
+        diagnostic_logger.close()
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+            from utils.diagnostic_report import build_report  # type: ignore
+
+            eval_results_path = (out_dir_path / "eval_results.json") if out_dir_path else None
+            build_report(out_dir_path, eval_results_path)
+            print(f"[train_local] wrote diagnostic_report.md")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[train_local] diagnostic_report skipped: {exc}")
 
     if args.output_dir is not None:
         out_dir = Path(args.output_dir)
