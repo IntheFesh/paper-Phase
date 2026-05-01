@@ -30,49 +30,22 @@ Concordance detector (rank-based fusion):
 
 where :math:`\\mathrm{rank}_W` is the percentile rank within a rolling window of
 size ``W``.
-
-Implementation status
----------------------
-* :func:`compute_I_hat_1` — implemented (wraps existing ``phase_beta`` / β_t).
-* :func:`compute_I_hat_2` — PENDING: see ``MIGRATION_NOTES.md`` §1.
-* :func:`compute_I_hat_3` — PENDING: see ``MIGRATION_NOTES.md`` §2.
-* :func:`compute_concordance_C` — PENDING: blocked on I_hat_2 and I_hat_3.
-
-Implementation roadmap (v2.0):
-
-* ``compute_I_hat_1``: IMPLEMENTED — used in Ablation 02, 07 and §6.5.
-* ``compute_I_hat_2``: PENDING — Ablation 03 blocked; target v2.1.
-* ``compute_I_hat_3``: PENDING — Ablation 04 blocked; target v2.1.
-* ``compute_concordance_C``: PENDING — Ablation 05 blocked; target v2.1.
-
-Ablation configs 03/04/05 currently produce placeholder results.
-Do NOT interpret their eval_results.json as real measurements.
-
-Internal names (Round-4 vintage) are kept as implementation details inside
-``phase_posterior.py`` and ``modeling_phaseqflow.py``; only the cliff-namespace
-names defined here are the public-facing interface.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections import deque
+from typing import Dict, List, Optional, Sequence
 
 import torch
 
 
 # ---------------------------------------------------------------------------
-# I_hat_1 — Bhattacharyya cliff estimator  (IMPLEMENTED)
+# I_hat_1 — Bhattacharyya cliff estimator
 # ---------------------------------------------------------------------------
 
 def compute_I_hat_1(phase_beta: torch.Tensor) -> torch.Tensor:
     r"""Cliff estimator :math:`\hat I^{(1)}(t) = -\beta_t`.
-
-    :math:`\beta_t \in [0, 1]` is the Bhattacharyya boundary signal produced by
-    :class:`~lerobot_policy_phaseqflow.phase_centric.phase_posterior.PhasePosteriorEstimator`.
-    Negating it gives a signal that is:
-
-    * high (≈ 0) in stable interior states — high predictability,
-    * low (≈ −1) at phase boundaries — low predictability, i.e. a cliff.
 
     Parameters
     ----------
@@ -88,96 +61,174 @@ def compute_I_hat_1(phase_beta: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# I_hat_2 — action-variance cliff estimator  (PENDING)
+# I_hat_2 — action-variance cliff estimator
 # ---------------------------------------------------------------------------
 
-def compute_I_hat_2(
-    action_samples: Optional[torch.Tensor] = None,
-) -> Optional[torch.Tensor]:
-    r"""Cliff estimator :math:`\hat I^{(2)}(t) = -\sigma_t^2`.  **PENDING.**
+def compute_I_hat_2(action_samples: torch.Tensor) -> torch.Tensor:
+    r"""Cliff estimator :math:`\hat I^{(2)}(t) = -\sigma_t^2`.
 
-    Requires ``N ≥ 2`` action samples at each step; computation is blocked
-    pending the decisions in ``MIGRATION_NOTES.md`` §1.
+    Computes the negative mean squared deviation of ``N`` action samples around
+    their batch mean.  Higher magnitude (more negative) means higher action
+    variance, i.e. lower predictability — a cliff signal.
 
-    Status
-    ------
-    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
-    implementation.
+    Parameters
+    ----------
+    action_samples : Tensor
+        Shape ``(N, B, Ta, Da)`` where:
+        * ``N`` — number of independent samples (≥ 2),
+        * ``B`` — batch size,
+        * ``Ta`` — action horizon,
+        * ``Da`` — action dimension.
+
+    Returns
+    -------
+    Tensor
+        Shape ``(B,)``, values ≤ 0.
 
     Raises
     ------
-    NotImplementedError
-        Always, until the pending decisions are resolved.
+    ValueError
+        If ``action_samples.ndim != 4`` or ``N < 2``.
     """
-    raise NotImplementedError(
-        "compute_I_hat_2 is not yet implemented. "
-        "See MIGRATION_NOTES.md §1 (Pending Human Decisions) for the "
-        "multi-sample anchor mechanism that needs to be decided first."
-    )
+    if action_samples.ndim != 4:
+        raise ValueError(
+            f"action_samples must be 4-D (N, B, Ta, Da), got shape {action_samples.shape}"
+        )
+    N = action_samples.shape[0]
+    if N < 2:
+        raise ValueError(f"Need N >= 2 action samples to estimate variance, got N={N}")
+
+    mean_action = action_samples.mean(dim=0, keepdim=True)          # (1, B, Ta, Da)
+    sq_dev = (action_samples - mean_action).pow(2).sum(dim=(-2, -1))  # (N, B)
+    return -sq_dev.mean(dim=0)                                        # (B,)
 
 
 # ---------------------------------------------------------------------------
-# I_hat_3 — velocity-difference cliff estimator  (PENDING)
+# I_hat_3 — velocity-curvature cliff estimator
 # ---------------------------------------------------------------------------
 
 def compute_I_hat_3(
-    v_theta_ct: Optional[torch.Tensor] = None,
-    v_theta_ct_prev: Optional[torch.Tensor] = None,
-) -> Optional[torch.Tensor]:
-    r"""Cliff estimator :math:`\hat I^{(3)}(t)`.  **PENDING.**
+    v_theta_ct: torch.Tensor,
+    v_theta_ct_prev: torch.Tensor,
+) -> torch.Tensor:
+    r"""Cliff estimator :math:`\hat I^{(3)}(t) = -\|v_\theta(c_t) - v_\theta(c_{t-1})\|^2`.
 
-    Requires the flow-matching velocity field evaluated at a fixed anchor
-    ``(x_τ, τ)`` under two consecutive condition vectors ``c_t`` and
-    ``c_{t-1}``.  Blocked pending the decisions in ``MIGRATION_NOTES.md`` §2.
+    Measures how much the flow-matching velocity field changed between consecutive
+    condition vectors at a fixed anchor point ``(x_τ, τ)``.  Large change →
+    lower predictability → cliff signal.
 
-    Status
-    ------
-    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
-    implementation.
+    Parameters
+    ----------
+    v_theta_ct : Tensor
+        Velocity at current condition, shape ``(B, Ta, Da)``.
+    v_theta_ct_prev : Tensor
+        Velocity at previous condition, same shape.
+
+    Returns
+    -------
+    Tensor
+        Shape ``(B,)``, values ≤ 0.
 
     Raises
     ------
-    NotImplementedError
-        Always, until the pending decisions are resolved.
+    ValueError
+        If ``v_theta_ct.shape != v_theta_ct_prev.shape``.
     """
-    raise NotImplementedError(
-        "compute_I_hat_3 is not yet implemented. "
-        "See MIGRATION_NOTES.md §2 (Pending Human Decisions) for anchor "
-        "point selection and velocity exposure decisions."
-    )
+    if v_theta_ct.shape != v_theta_ct_prev.shape:
+        raise ValueError(
+            f"Shape mismatch: v_theta_ct {v_theta_ct.shape} vs "
+            f"v_theta_ct_prev {v_theta_ct_prev.shape}"
+        )
+    diff = v_theta_ct - v_theta_ct_prev                             # (B, Ta, Da)
+    sq_norm = diff.reshape(diff.shape[0], -1).pow(2).sum(dim=-1)    # (B,)
+    return -sq_norm
 
 
 # ---------------------------------------------------------------------------
-# Concordance C_t  (PENDING — blocked on I_hat_2 and I_hat_3)
+# Rolling-rank buffer for concordance
+# ---------------------------------------------------------------------------
+
+class _RollingRankBuffer:
+    """Online percentile-rank tracker over a fixed-length window."""
+
+    def __init__(self, window_size: int) -> None:
+        self._buf: deque[float] = deque(maxlen=window_size)
+
+    def push_and_rank(self, value: float) -> float:
+        """Push *value* and return its percentile rank in [0, 1]."""
+        self._buf.append(value)
+        n = len(self._buf)
+        if n == 1:
+            return 0.5
+        return sum(1.0 for x in self._buf if x <= value) / n
+
+
+# ---------------------------------------------------------------------------
+# Concordance C_t — rank-based fusion of all three estimators
 # ---------------------------------------------------------------------------
 
 def compute_concordance_C(
     i_hat_values: Sequence[torch.Tensor],
     window_size: int = 50,
-) -> Optional[torch.Tensor]:
-    r"""Concordance detector :math:`C_t`.  **PENDING.**
+    _state: Optional[Dict] = None,
+) -> torch.Tensor:
+    r"""Concordance detector :math:`C_t \in [0, 1]`.
 
-    :math:`C_t = \frac{1}{3}[\mathrm{rank}_W(\hat I^{(1)}) +
-    \mathrm{rank}_W(\hat I^{(2)}) + \mathrm{rank}_W(\hat I^{(3)})]`
+    :math:`C_t = \frac{1}{K}\sum_{k=1}^{K}\mathrm{rank}_W(\hat I^{(k)}(t))`
 
-    Blocked until :func:`compute_I_hat_2` and :func:`compute_I_hat_3` are
-    implemented; see ``MIGRATION_NOTES.md``.
+    where :math:`\mathrm{rank}_W` is the percentile rank within a rolling window
+    of the last ``window_size`` values for estimator ``k`` and batch element
+    ``b``.
 
-    Status
-    ------
-    PENDING (v2.1) — Ablation configs 03/04/05 are disabled pending this
-    implementation.
+    Parameters
+    ----------
+    i_hat_values : sequence of Tensor
+        Each tensor has shape ``(B,)``.  Typically the list
+        ``[I_hat_1, I_hat_2, I_hat_3]`` but any non-empty subset is accepted.
+    window_size : int
+        Rolling-window length for percentile ranking (default 50).
+    _state : dict or None
+        Persistent rank-buffer state across calls.  Pass the same dict on
+        every forward step so that the rolling window accumulates correctly.
+        If ``None``, a fresh (memoryless) state is used — suitable only for
+        unit tests.
+
+    Returns
+    -------
+    Tensor
+        Shape ``(B,)``, values in ``[0, 1]``.  High ≈ cliff (all estimators
+        agree on low predictability); low ≈ stable interior.
 
     Raises
     ------
-    NotImplementedError
-        Always, until the pending decisions are resolved.
+    ValueError
+        If ``i_hat_values`` is empty or tensors have inconsistent batch sizes.
     """
-    raise NotImplementedError(
-        "compute_concordance_C is not yet implemented. "
-        "Blocked on compute_I_hat_2 and compute_I_hat_3. "
-        "See MIGRATION_NOTES.md for the full dependency chain."
-    )
+    if len(i_hat_values) == 0:
+        raise ValueError("i_hat_values must contain at least one estimator tensor")
+
+    K = len(i_hat_values)
+    B = i_hat_values[0].shape[0]
+    for k, t in enumerate(i_hat_values):
+        if t.shape[0] != B:
+            raise ValueError(
+                f"Batch-size mismatch: i_hat_values[0] has B={B} but "
+                f"i_hat_values[{k}] has B={t.shape[0]}"
+            )
+
+    if _state is None:
+        _state = {}
+
+    rank_sum = torch.zeros(B, dtype=torch.float32, device=i_hat_values[0].device)
+
+    for k, i_hat in enumerate(i_hat_values):
+        if k not in _state:
+            _state[k] = [_RollingRankBuffer(window_size) for _ in range(B)]
+        buffers: List[_RollingRankBuffer] = _state[k]
+        for b in range(B):
+            rank_sum[b] += buffers[b].push_and_rank(float(i_hat[b].detach()))
+
+    return rank_sum / K
 
 
 __all__ = [
@@ -185,4 +236,5 @@ __all__ = [
     "compute_I_hat_2",
     "compute_I_hat_3",
     "compute_concordance_C",
+    "_RollingRankBuffer",
 ]

@@ -1519,6 +1519,9 @@ class PhaseQFlowPolicy(nn.Module):
         self._rollout_chunk: Optional[torch.Tensor] = None
         self._rollout_chunk_start: int = 0
         self._iql_step_counter: int = 0
+        # Cliff-estimator rollout state (cleared by reset())
+        self._v_theta_prev: Optional[torch.Tensor] = None
+        self._concordance_state: dict = {}
         if bool(getattr(config, "use_temporal_ensembling", False)) and self.flow_type == "shortcut":
             from .temporal_ensembler import ACTTemporalEnsembler
 
@@ -1776,9 +1779,50 @@ class PhaseQFlowPolicy(nn.Module):
             preds["phase_p_hat"] = phase_p_hat
         if phase_beta is not None:
             preds["phase_beta"] = phase_beta
-            # Cliff-namespace public-facing interface: I_hat_1 = -beta_t
-            from .phase_centric.cliff_estimators import compute_I_hat_1
+            from .phase_centric.cliff_estimators import (
+                compute_I_hat_1,
+                compute_I_hat_2,
+                compute_I_hat_3,
+                compute_concordance_C,
+            )
             preds["I_hat_1"] = compute_I_hat_1(phase_beta)
+
+            # I_hat_3: velocity-field curvature at a fixed anchor (x=0, tau=0.5)
+            _flow_head = self.pace_b_flow_head if self.pace_b_flow_head is not None else self.flow_action_head
+            if hasattr(_flow_head, "compute_cond") and hasattr(_flow_head, "velocity"):
+                try:
+                    B_f = fused_obs.shape[0]
+                    Ta = int(self.config.action_chunk_size)
+                    Da = int(self.config.action_dim)
+                    cond_t = _flow_head.compute_cond(
+                        fused_obs, plan["phase_embed"], plan["skill_latent"]
+                    )
+                    anchor = torch.zeros(B_f, Ta, Da, device=fused_obs.device, dtype=fused_obs.dtype)
+                    v_theta_ct = _flow_head.velocity(anchor, tau=0.5, cond=cond_t).detach()
+                    if (
+                        self._v_theta_prev is not None
+                        and self._v_theta_prev.shape == v_theta_ct.shape
+                    ):
+                        preds["I_hat_3"] = compute_I_hat_3(v_theta_ct, self._v_theta_prev)
+                    self._v_theta_prev = v_theta_ct
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # I_hat_2: action-sample variance from BID multi-sample chunks
+            bid_chunks = preds.get("bid_chunks")
+            if isinstance(bid_chunks, torch.Tensor) and bid_chunks.ndim == 4 and bid_chunks.shape[0] >= 2:
+                try:
+                    preds["I_hat_2"] = compute_I_hat_2(bid_chunks)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # concordance C_t: rank-based fusion of available estimators
+            available_hats = [v for k, v in preds.items() if k in ("I_hat_1", "I_hat_2", "I_hat_3")]
+            if available_hats:
+                preds["concordance_C"] = compute_concordance_C(
+                    available_hats, window_size=50, _state=self._concordance_state
+                )
+
         if beta_micro is not None:
             preds["beta_micro"] = beta_micro
         return preds
@@ -2097,6 +2141,8 @@ class PhaseQFlowPolicy(nn.Module):
             self._bid_sampler.reset()
         if self.phase_posterior is not None:
             self.phase_posterior.reset(batch_size=1)
+        self._v_theta_prev = None
+        self._concordance_state = {}
         if self.pace_b_flow_head is not None and hasattr(self.pace_b_flow_head, "reset_switching"):
             self.pace_b_flow_head.reset_switching(batch_size=1)
         if self._pcar_trigger is not None:

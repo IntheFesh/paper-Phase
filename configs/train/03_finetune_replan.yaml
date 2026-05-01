@@ -1,17 +1,27 @@
-# Stage 3 of 3: freeze main network; calibrate PCAR / B-PCAR / Concordance only
-# Replaces the former stage 4 (calibration-only fine-tuning).
+# Stage 3 of 3: calibration-only — freeze main network; calibrate PCAR / concordance
+# No gradient updates to vision, planner, or flow head.
+# Target: short calibration pass (≈1000 rollout steps) on LIBERO-Long holdout split.
 policy: phaseqflow
 stage: finetune_replan
 notes: >
   All main network weights are frozen.  Only the replanning calibration
-  modules (B-PCAR threshold, concordance window) are updated.
+  modules (B-PCAR threshold, concordance window) are updated via closed-form
+  percentile calibration — no gradient steps required.
   Uses a held-out LIBERO-Long split for calibration rollouts.
+
 phaseqflow:
   freeze_vision_encoder: true
   freeze_all_main: true
-  calibration_only: true
+  calibration_only: true      # skip optimizer; update calibration params only
   calibration_dataset: libero_long_holdout
   pcar_input_signal: concordance
+
 calibrate:
-  - b_pcar
-  - concordance
+  - b_pcar                    # B-PCAR replan threshold (percentile-based)
+  - concordance               # concordance window size W
+
+training:
+  epochs: 1                   # calibration is a single-pass scan
+  batch_size: 256
+  mixed_precision: bf16
+  grad_clip: 0.0              # no gradient updates
