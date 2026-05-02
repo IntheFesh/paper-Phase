@@ -58,6 +58,15 @@ try:
 except ImportError:
     _CLIFF_ESTIMATORS_AVAILABLE = False
 
+# lerobot's env processor applies torch.flip(img, dims=[2,3]) on all
+# observation.images.* keys during training.  Use it directly here so the
+# eval path is identical; fall back to manual flip when lerobot is absent.
+try:
+    from lerobot.processor.env_processor import LiberoProcessorStep as _LiberoProcessorStep
+    _LIBERO_PROCESSOR = _LiberoProcessorStep()
+except ImportError:
+    _LIBERO_PROCESSOR = None
+
 
 # ---------------------------------------------------------------------------
 # Perturbation helpers
@@ -154,6 +163,38 @@ def _synthetic_eval(
 # Real evaluation
 # ---------------------------------------------------------------------------
 
+def _process_obs_image(raw_img: np.ndarray) -> "torch.Tensor":
+    """Convert a raw (H, W, 3) uint8 image to a (1, 3, H, W) float tensor.
+
+    Applies the same 180° flip (torch.flip dims=[2,3]) that
+    lerobot.processor.env_processor.LiberoProcessorStep._process_observation()
+    performs on every observation.images.* key during training, then SigLIP
+    normalisation ((x - 0.5) / 0.5).  When LiberoProcessorStep is available it
+    is called directly; otherwise the flip is applied manually so the two paths
+    stay bit-identical.
+    """
+    import torch
+
+    if _LIBERO_PROCESSOR is not None:
+        try:
+            # _process_observation expects {key: np.array (H,W,3)} and returns
+            # the same dict with processed tensors (flipped + normalised).
+            out = _LIBERO_PROCESSOR._process_observation(
+                {"observation.images.agentview": raw_img}
+            )
+            img_t = out["observation.images.agentview"]
+            if not isinstance(img_t, torch.Tensor):
+                img_t = torch.tensor(img_t, dtype=torch.float32)
+            return img_t.unsqueeze(0) if img_t.ndim == 3 else img_t
+        except Exception:
+            pass  # fall through to manual path
+
+    img_t = torch.tensor(raw_img, dtype=torch.float32).permute(2, 0, 1) / 255.0
+    img_t = img_t.unsqueeze(0)                   # (1, 3, H, W)
+    img_t = torch.flip(img_t, dims=[2, 3])        # match LiberoProcessorStep._process_observation
+    return (img_t - 0.5) / 0.5                   # SigLIP normalisation
+
+
 def _load_policy(checkpoint_path: str, device: str = "cuda"):
     sys.path.insert(
         0,
@@ -239,10 +280,11 @@ def _run_perturbed(
             if state_np.shape[0] < 8:
                 state_np = np.pad(state_np, (0, 8 - state_np.shape[0]))
 
-            # 图像：LiberoEnv 已输出 224×224；SigLIP 归一化 (x-0.5)/0.5
+            # 图像：LiberoEnv 输出 224×224；flip + SigLIP 归一化由 _process_obs_image 统一处理
             raw_img = obs.get("pixels", np.zeros((224, 224, 3), dtype=np.uint8))
-            img_t = torch.tensor(raw_img, dtype=torch.float32).permute(2, 0, 1) / 255.0
-            img_t = (img_t.unsqueeze(0) - 0.5) / 0.5              # (1, 3, 224, 224)
+            if isinstance(raw_img, dict):
+                raw_img = next(iter(raw_img.values()))  # 多相机时取第一个
+            img_t = _process_obs_image(raw_img)          # (1, 3, 224, 224)
             # V=2 双视角：单目复制作 wrist_image 占位
             img_2v = img_t.unsqueeze(1).expand(-1, 2, -1, -1, -1)  # (1,2,3,224,224)
 
