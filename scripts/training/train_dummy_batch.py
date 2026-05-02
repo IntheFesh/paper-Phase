@@ -338,6 +338,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable CheckpointManager (rolling --checkpoint_keep_last writes).",
     )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="W&B project name. When set, mirrors training_dynamics.csv to W&B.",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="W&B run name override. Defaults to the output_dir stem.",
+    )
+    parser.add_argument(
+        "--grad_explosion_threshold",
+        type=float,
+        default=100.0,
+        help="Gradient norm circuit-breaker threshold. Training halts and saves a checkpoint "
+             "if the pre-clip grad norm exceeds this value after the first 1000 steps.",
+    )
 
     from lerobot.configs.policies import PreTrainedConfig as _PTC
 
@@ -657,6 +676,23 @@ def main(argv: List[str] | None = None) -> int:
             raise ValueError("--enable_diagnostics requires --output_dir")
         diagnostic_logger = DiagnosticLogger(out_dir_path, log_every_n_steps=args.diagnostic_log_every)
 
+    _wandb = None
+    if args.wandb_project:
+        try:
+            import wandb as _wandb_mod
+            _wandb_mod.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name or (out_dir_path.name if out_dir_path else "pace_v2"),
+                config=vars(args),
+                resume="allow",
+            )
+            _wandb = _wandb_mod
+            print(f"[train_local] W&B logging → project={args.wandb_project}")
+        except ImportError:
+            print("[train_local] wandb not installed; W&B logging disabled")
+        except Exception as _we:
+            print(f"[train_local] W&B init failed ({_we!r}); continuing without W&B")
+
     ckpt_manager: CheckpointManager | None = None
     if args.enable_checkpointing or args.resume_from_checkpoint:
         if out_dir_path is None:
@@ -710,7 +746,21 @@ def main(argv: List[str] | None = None) -> int:
             [p for p in policy.parameters() if p.requires_grad and p.grad is not None],
             max_norm=float(cfg.grad_clip_norm),
         )
+        grad_norm_val = float(grad_norm) if grad_norm is not None else 0.0
         optimizer.step()
+
+        # Gradient explosion circuit breaker: pre-clip norm >threshold after warm-up → save + halt
+        if grad_norm_val > args.grad_explosion_threshold and step > 1000:
+            print(
+                f"[熔断] step={step + 1}  grad_norm={grad_norm_val:.1f} "
+                f"> {args.grad_explosion_threshold:.0f}, 保存 checkpoint 后退出"
+            )
+            if ckpt_manager is not None:
+                ckpt_manager.save(
+                    step + 1, policy, optimizer,
+                    extra={"mode": args.phase_centric_mode, "stop_reason": "grad_explosion"},
+                )
+            break
 
         if curriculum is not None:
             curriculum.step()
@@ -735,7 +785,7 @@ def main(argv: List[str] | None = None) -> int:
                 "loss_infonce_macro": out.get("loss_infonce_macro"),
                 "loss_infonce_micro": out.get("loss_infonce_micro"),
             }
-            grad_norms = {"total": float(grad_norm) if grad_norm is not None else float("nan")}
+            grad_norms = {"total": grad_norm_val}
             phase_stats = {
                 "pace_a_mean_beta": out.get("pace_a_mean_beta"),
                 "pace_a_max_beta": out.get("pace_a_max_beta"),
@@ -760,6 +810,25 @@ def main(argv: List[str] | None = None) -> int:
                 gpu_memory_gb=gpu_mem,
                 step_time_sec=step_time_sec,
             )
+            if _wandb is not None:
+                _wandb.log(
+                    {
+                        "loss/total": loss_val,
+                        "loss/imitation": out.get("loss_imitation") or float("nan"),
+                        "loss/flow_policy": out.get("loss_flow_policy") or float("nan"),
+                        "loss/infonce_macro": out.get("loss_infonce_macro") or float("nan"),
+                        "loss/infonce_micro": out.get("loss_infonce_micro") or float("nan"),
+                        "grad_norm": grad_norm_val,
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "gpu_memory_gb": gpu_mem,
+                        "step_time_sec": step_time_sec,
+                        "pace/mean_beta": out.get("pace_a_mean_beta") or float("nan"),
+                        "pace/boundary_density": out.get("pace_a_boundary_density") or float("nan"),
+                        "pcar/trigger_rate": out.get("pcar_trigger_rate") or float("nan"),
+                        "pcar/mean_concordance": out.get("pcar_mean_concordance") or float("nan"),
+                    },
+                    step=step,
+                )
 
         if ckpt_manager is not None and ckpt_manager.should_save(step + 1):
             ckpt_manager.save(step + 1, policy, optimizer, extra={"mode": args.phase_centric_mode})
@@ -774,6 +843,9 @@ def main(argv: List[str] | None = None) -> int:
 
     elapsed = time.perf_counter() - t0
     print(f"[train_local] DONE ({elapsed:.2f}s, {total_steps - start_step} steps)")
+
+    if _wandb is not None:
+        _wandb.finish()
 
     if diagnostic_logger is not None:
         diagnostic_logger.close()
