@@ -61,7 +61,7 @@ class PhaseQFlowConfig(PreTrainedConfig):
     verifier_hidden_dim: int = 128
     replan_confidence_threshold: float = 0.5
 
-    action_dim: int = 16
+    action_dim: int = 7
     max_timestep: int = 2048
     base_loss_weight: float = 0.25
 
