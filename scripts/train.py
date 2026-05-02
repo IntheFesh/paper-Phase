@@ -164,9 +164,9 @@ def _run_smoke_stage(stage_cfg: Dict[str, Any], device: str, steps: int = 3) -> 
 
 
 _STAGE_TO_MODE = {
-    "01_pretrain_multimodal": "off",
-    "02_train_phase_and_flow": "a",
-    "03_finetune_replan": "pcar",
+    "pretrain_multimodal": "off",
+    "train_phase_and_flow": "a",
+    "finetune_replan": "pcar",
 }
 
 

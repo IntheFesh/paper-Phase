@@ -566,9 +566,10 @@ def _build_real_dataloader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=8,
         drop_last=True,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=True,
     )
 
     def _infinite(dl: "Any"):
@@ -762,6 +763,14 @@ def main(argv: List[str] | None = None) -> int:
 
         if ckpt_manager is not None and ckpt_manager.should_save(step + 1):
             ckpt_manager.save(step + 1, policy, optimizer, extra={"mode": args.phase_centric_mode})
+
+    # 保存 config.json（评估脚本依赖此文件）
+    if out_dir_path is not None:
+        try:
+            cfg.save_pretrained(str(out_dir_path))
+            print(f"[train_local] saved config.json → {out_dir_path}")
+        except Exception as _e:
+            print(f"[train_local] WARNING: config.json 保存失败: {_e!r}")
 
     elapsed = time.perf_counter() - t0
     print(f"[train_local] DONE ({elapsed:.2f}s, {total_steps - start_step} steps)")
