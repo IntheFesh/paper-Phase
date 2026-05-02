@@ -520,18 +520,31 @@ configs/
 baselines/        Cross-policy adapters (OpenVLA, π0, BC-ACT, Diffusion Policy)
 lerobot_policy_phaseqflow/
   src/.../        Policy implementation (PhaseQFlowPolicy, PhaseQFlowConfig)
-  phase_centric/  Phase posterior, cliff estimators, concordance, PCAR
+  phase_centric/  Training-side: phase posterior, cliff estimators (loss path),
+                  PCAR / B-PCAR / boundary-aware flow loss
+  inference/      Runtime-side (PACE v2): compute_policy_variance (I^(2)),
+                  compute_velocity_curvature (I^(3)), ConcordanceDetector (C_t)
 scripts/
   phenomenon/     Universality, regret scaling, triangulation experiments
   eval/           LIBERO-Perturbed and SimplerEnv evaluation
   figures/        Publication-grade figure generation
   diagnostics/    Boundary error, replan alignment, trigger comparison, cost
   calibration/    Concordance threshold and B-PCAR sweeps
-tests/            204 unit + smoke tests
+tests/            Unit + smoke tests (covers training and inference paths)
 docs/
-  ARCHITECTURE.md Full architecture specification
-  OPERATIONS_GUIDE.md Engineering handbook
+  ARCHITECTURE.md      Full architecture specification
+  OPERATIONS_GUIDE.md  Engineering handbook
+  EXPERIMENT_RUNBOOK.md End-to-end GPU reproduction guide
 ```
+
+The training and inference cliff signals are intentionally split:
+* `phase_centric/cliff_estimators.py` provides tensor-level functions
+  (`compute_I_hat_1/2/3`, `compute_concordance_C`) consumed inside
+  `PhaseQFlowPolicy.forward()` for loss / diagnostics.
+* `inference/` exposes the runtime API used by evaluation rollouts
+  (`scripts/eval/libero_perturbed.py`) — `ConcordanceDetector` + standalone
+  estimator functions that read the policy's cached `_last_beta` and
+  `flow_action_head._last_condition` to fuse I^(1)/I^(2)/I^(3) into C_t.
 
 ---
 

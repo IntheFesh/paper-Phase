@@ -22,6 +22,22 @@
 5. When a command says "(dry run)" you can run it on a CPU-only box to
    sanity-check the pipeline. Real numbers always require GPU.
 
+> **External helpers in §3.** The dataset and baseline-checkpoint commands in
+> Part 3 (`scripts/data/download_libero.py`, `download_baselines.py`,
+> `verify_baselines.py`, `build_calibration_split.py`,
+> `build_libero_perturbed.py`, `download_simpler.py`,
+> `verify_dataset.py`) are intended to wrap the upstream LIBERO / SimplerEnv /
+> HuggingFace download flow and are **not bundled with this repo**. Use the
+> shipped `scripts/data/inspect_dataset.py` and
+> `scripts/data/compute_episode_lengths.py` together with the upstream
+> dataset download commands described at
+> <https://libero-project.github.io> and
+> <https://huggingface.co/HuggingFaceVLA>. The actual training and eval
+> entry points in Parts 4–11 (`scripts/train.py`,
+> `scripts/training/train_dummy_batch.py`,
+> `scripts/eval/run_libero_main.sh`, `scripts/aggregate_ablation.py`, …)
+> are all present in the repository.
+
 ---
 
 ## Table of contents

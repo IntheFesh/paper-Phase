@@ -43,3 +43,41 @@ Tests: `tests/test_cliff_estimators.py` — 22 unit + integration cases (no NotI
 The YAML files for the dropped ablations (03/04/05/06) and the phenomenon
 scripts (universality, triangulation, trigger comparison) remain in the
 codebase for reference and unit tests, but the cloud sweep does not run them.
+
+---
+
+## v2 Runtime Cliff Detection (added)
+
+The v2 inference path is split into two layers; **do not delete either**.
+
+### Training-side (`phase_centric/`)
+Used inside `PhaseQFlowPolicy.forward()` to compute the cliff signals as
+auxiliary losses / diagnostics on tensor batches. Files:
+`phase_centric/cliff_estimators.py`, `phase_centric/cliff_detection/{concordance,
+policy_variance, velocity_curvature, posterior_bhattacharyya}.py`.
+Consumed by `tests/test_cliff_estimators*.py`, `tests/test_concordance.py`,
+`scripts/phenomenon/triangulation_concordance.py`, and the calibration
+scripts. **Stays in place.**
+
+### Runtime-side (`inference/`, new in v2)
+Used by `scripts/eval/libero_perturbed.py` (and any future eval harness)
+to make per-step replanning decisions:
+
+| File | Role |
+|---|---|
+| `inference/cliff_estimators.py` | `compute_policy_variance` (I^(2)), `compute_velocity_curvature` (I^(3)) — wrap policy interface, no training deps |
+| `inference/concordance.py` | `ConcordanceDetector` — sliding-window rank fusion → C_t |
+
+I^(1) (Bhattacharyya β_t) is read from `policy._last_beta`, written by
+`PhaseQFlowPolicy.select_action()` after every forward call.
+The flow head's condition vector c_t is cached at
+`flow_action_head._last_condition` (set in `ShortcutFlowActionHead.forward()`)
+so I^(3) can be computed without an extra forward pass.
+Tests: `tests/test_inference_concordance.py`.
+
+### action_dim = 7 reset
+`PhaseQFlowConfig.action_dim` was changed from `16 → 7` to match LIBERO's
+7-DoF action space. **Stage 1 and Stage 2 checkpoints trained with the old
+default are incompatible with the current code** — retrain from scratch or
+use `CheckpointManager.load_partial()` (added) to skip the mismatched
+action head and re-initialise it.
