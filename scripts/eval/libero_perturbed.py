@@ -41,6 +41,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# v2：三估计器 concordance cliff 检测
+import sys as _sys
+_sys.path.insert(
+    0,
+    str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent
+        / "lerobot_policy_phaseqflow" / "src"),
+)
+try:
+    from lerobot_policy_phaseqflow.inference.cliff_estimators import (
+        compute_policy_variance,
+        compute_velocity_curvature,
+    )
+    from lerobot_policy_phaseqflow.inference.concordance import ConcordanceDetector
+    _CLIFF_ESTIMATORS_AVAILABLE = True
+except ImportError:
+    _CLIFF_ESTIMATORS_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Perturbation helpers
@@ -208,6 +225,14 @@ def _run_perturbed(
 
         success = False
         t = 0
+        # v2 cliff 检测器（每 episode 重置）
+        if _CLIFF_ESTIMATORS_AVAILABLE:
+            _concordance = ConcordanceDetector(window=16, threshold=0.35)
+            _concordance.reset()
+            _prev_condition = None
+        else:
+            _concordance = None
+            _prev_condition = None
         for t in range(500):
             # LiberoEnv obs keys: robot_state (np.float32, ≥8 dims), pixels (H,W,3 uint8)
             state_np = np.array(obs.get("robot_state", np.zeros(8)), dtype=np.float32)[:8]
@@ -232,6 +257,25 @@ def _run_perturbed(
                 action = policy.select_action(obs_dict)
             action_np = action.cpu().numpy().ravel() if hasattr(action, "cpu") else np.array(action)
             action_np = action_np[:7]          # LIBERO 接受 7 维
+
+            # v2：计算 concordance 并决定是否触发重规划
+            if _concordance is not None and _CLIFF_ESTIMATORS_AVAILABLE:
+                # I^(1)：β_t（从 policy 内部属性获取；若不存在则用 0）
+                i1 = float(getattr(policy, "_last_beta", 0.0))
+
+                # I^(2)：动作方差（快速采样 4 个候选）
+                i2 = compute_policy_variance(policy, obs_dict, n_samples=4)
+
+                # I^(3)：velocity curvature
+                i3, _prev_condition = compute_velocity_curvature(
+                    policy, obs_dict, _prev_condition
+                )
+
+                c_t = _concordance.update(i1, i2, i3)
+                _is_cliff = _concordance.is_cliff(c_t)
+            else:
+                _is_cliff = False
+
             obs, reward, done, truncated, info = env.step(action_np)
             if done or truncated:
                 success = bool(info.get("is_success", False))

@@ -1035,6 +1035,7 @@ class ShortcutFlowActionHead(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Run training (flow-matching + self-consistency) or inference (1-NFE)."""
         cond = self.conditioner(torch.cat([fused_obs, phase_embed, skill_latent], dim=-1))
+        self._last_condition = cond.detach()  # 供 I^(3) 估计器使用
         batch_size = cond.shape[0]
         device = cond.device
 
@@ -2288,6 +2289,27 @@ class PhaseQFlowPolicy(nn.Module):
         return (v_drop > v_drop_thr) or (var_val > var_thr)
 
     @torch.no_grad()
+    def get_condition(self, obs_dict: dict) -> torch.Tensor:
+        """返回 flow head 当前时刻的条件向量 c_t，用于 I^(3) 估计器。
+
+        c_t 是 phase embedding 与 vision/language feature 的融合表示，
+        对应 flow matching 中 v_θ(x_τ, τ, c_t) 的条件输入。
+        """
+        if hasattr(self, "planner") and hasattr(self.planner, "encode"):
+            c_t = self.planner.encode(obs_dict)
+        elif hasattr(self, "flow_action_head") and hasattr(self.flow_action_head, "encode_condition"):
+            c_t = self.flow_action_head.encode_condition(obs_dict)
+        else:
+            # fallback：从 ShortcutFlowActionHead.forward() 缓存的 _last_condition 读取
+            c_t = getattr(self.flow_action_head, "_last_condition", None)
+            if c_t is None:
+                raise AttributeError(
+                    "policy 未暴露 condition。请确认 ShortcutFlowActionHead.forward() 中"
+                    "已设置 self._last_condition = cond.detach()，或实现 encode_condition()。"
+                )
+        return c_t
+
+    @torch.no_grad()
     def select_action(self, obs: Dict[str, Any]) -> torch.Tensor:
         """Select a single action for online execution.
 
@@ -2370,11 +2392,16 @@ class PhaseQFlowPolicy(nn.Module):
                         self._pcar_trigger.update_and_check(float(beta_t.mean().item()))
                     )
                     self._last_replan_flag = pcar_triggered
+                    self._last_beta = float(beta_t.mean().item())
                 if pcar_triggered:
                     need_new_chunk = True
             if need_new_chunk:
                 if out is None:
                     out = self.forward(**batched)
+                    # capture _last_beta when PCAR is off
+                    _pb = out.get("phase_beta")
+                    if isinstance(_pb, torch.Tensor):
+                        self._last_beta = float(_pb.mean().item())
                 self._rollout_chunk = out["action_pred"].detach()
                 self._rollout_chunk_start = self._rollout_step
             offset = self._rollout_step - self._rollout_chunk_start
