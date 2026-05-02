@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 
-__all__ = ["CheckpointManager"]
+__all__ = ["CheckpointManager", "load_partial"]
 
 
 _DEFAULT_FILENAME_FMT = "checkpoint_step{step:09d}.pt"
@@ -166,11 +166,15 @@ class CheckpointManager:
         if not ckpt_path.is_file():
             raise FileNotFoundError(ckpt_path)
 
-        payload = torch.load(ckpt_path, map_location="cpu")
+        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         if hasattr(model, "load_state_dict"):
-            model.load_state_dict(payload["model"])
+            model.load_state_dict(payload["model"], strict=False)
         if optimizer is not None and payload.get("optimizer") is not None:
-            optimizer.load_state_dict(payload["optimizer"])
+            try:
+                optimizer.load_state_dict(payload["optimizer"])
+            except ValueError:
+                print("[CheckpointManager] optimizer state skipped "
+                      "(param groups changed between stages; optimizer restarts)")
         if scheduler is not None and payload.get("scheduler") is not None:
             scheduler.load_state_dict(payload["scheduler"])
         _restore_rng_state(payload.get("rng") or {})
@@ -254,3 +258,67 @@ def _restore_rng_state(state: dict) -> None:
             torch.cuda.set_rng_state_all(state["torch_cuda_all"])
     except ImportError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Partial-load helper (architecture-migration / cross-stage transfer)
+# ---------------------------------------------------------------------------
+
+def load_partial(
+    path: "os.PathLike[str] | str",
+    model: "Any",
+    verbose: bool = True,
+) -> "tuple[int, list, list]":
+    """只加载名字和形状都匹配的参数，用于架构修改后的迁移学习。
+
+    Returns
+    -------
+    step    : int   checkpoint 对应的训练步数
+    loaded  : list  成功加载的参数名列表
+    skipped : list  跳过的参数名列表
+    """
+    import torch
+
+    ckpt_path = Path(path)
+    if ckpt_path.is_dir():
+        latest = ckpt_path / _LATEST_SYMLINK
+        if latest.exists():
+            ckpt_path = (
+                latest.resolve()
+                if latest.is_symlink()
+                else (ckpt_path / latest.read_text().strip())
+            )
+        else:
+            candidates = sorted(
+                p for p in ckpt_path.iterdir()
+                if p.is_file() and p.name.startswith("checkpoint_step")
+            )
+            if not candidates:
+                raise FileNotFoundError(f"No checkpoints under {ckpt_path}")
+            ckpt_path = candidates[-1]
+
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    saved_state = payload["model"]
+    current_state = model.state_dict()
+
+    loaded, skipped, new_state = [], [], {}
+    for name, param in current_state.items():
+        if name not in saved_state:
+            skipped.append(f"{name} [not in checkpoint]")
+            new_state[name] = param
+        elif saved_state[name].shape != param.shape:
+            skipped.append(
+                f"{name} [shape mismatch: saved {saved_state[name].shape} "
+                f"vs current {param.shape}]"
+            )
+            new_state[name] = param
+        else:
+            new_state[name] = saved_state[name]
+            loaded.append(name)
+
+    model.load_state_dict(new_state)
+    if verbose:
+        print(f"[load_partial] 成功 {len(loaded)}/{len(current_state)} 层")
+        for s in skipped:
+            print(f"  跳过: {s}")
+    return int(payload.get("step", 0)), loaded, skipped
