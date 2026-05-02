@@ -13,6 +13,9 @@
 
 set -euo pipefail
 
+export PYTHONPATH=/root/LIBERO:${PYTHONPATH:-}
+export LD_LIBRARY_PATH=/root/miniconda3/envs/lerobot_env/lib:${LD_LIBRARY_PATH:-}
+
 CHECKPOINT="${CHECKPOINT:-}"
 N_ROLLOUTS="${N_ROLLOUTS:-50}"
 SEEDS="${SEEDS:-0 1 2}"

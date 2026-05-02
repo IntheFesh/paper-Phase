@@ -150,13 +150,17 @@ def _load_policy(checkpoint_path: str, device: str = "cuda"):
 
 
 def _make_libero_env(task_name: str, seed: int):
-    """Create a LIBERO-Long environment instance.
+    """Create a LIBERO environment instance using LiberoEnv.
+
+    LiberoEnv returns obs with robot_state / pixels keys, matching the
+    training-time PhaseQFlowProcessor format.  env.step() returns the
+    Gymnasium 5-tuple (obs, reward, done, truncated, info).
 
     Raises ImportError if libero is not installed.
     """
     try:
         from libero.libero import benchmark, get_libero_path
-        from libero.libero.envs import OffScreenRenderEnv
+        from libero.libero.envs import LiberoEnv
     except ImportError as e:
         raise ImportError(
             "libero package not installed. Install from https://github.com/Lifelong-Robot-Learning/LIBERO"
@@ -166,14 +170,13 @@ def _make_libero_env(task_name: str, seed: int):
     task_names = bm.get_task_names()
     task_id = task_names.index(task_name) if task_name in task_names else 0
     task = bm.get_task(task_id)
-    from libero.libero import get_libero_path
     bddl_file_name = str(get_libero_path("bddl_files")) + "/" + task.problem_folder + "/" + task.bddl_file
     env_args = {
         "bddl_file_name": bddl_file_name,
-        "camera_heights": 256,
-        "camera_widths": 256,
+        "camera_heights": 224,
+        "camera_widths": 224,
     }
-    env = OffScreenRenderEnv(**env_args)
+    env = LiberoEnv(**env_args)
     env.seed(seed)
     return env, task
 
@@ -206,23 +209,16 @@ def _run_perturbed(
         success = False
         t = 0
         for t in range(500):
-            # Build observation dict compatible with PhaseQFlow
-            # state: eef_pos[3] + axis_angle(quat[:3])[3] + gripper_qpos[:2] = 8 维
-            eef_pos    = np.array(obs.get("robot0_eef_pos",    np.zeros(3)), dtype=np.float32)
-            eef_rot    = np.array(obs.get("robot0_eef_quat",   np.zeros(4)), dtype=np.float32)
-            gripper_qp = np.array(obs.get("robot0_gripper_qpos", np.zeros(2)), dtype=np.float32)[:2]
-            state_np   = np.concatenate([eef_pos, eef_rot[:3], gripper_qp])[:8]
+            # LiberoEnv obs keys: robot_state (np.float32, ≥8 dims), pixels (H,W,3 uint8)
+            state_np = np.array(obs.get("robot_state", np.zeros(8)), dtype=np.float32)[:8]
             if state_np.shape[0] < 8:
                 state_np = np.pad(state_np, (0, 8 - state_np.shape[0]))
 
-            # 图像：256→224 resize + SigLIP 归一化 (x-0.5)/0.5
-            raw_img = obs.get("agentview_image", np.zeros((256, 256, 3), dtype=np.uint8))
+            # 图像：LiberoEnv 已输出 224×224；SigLIP 归一化 (x-0.5)/0.5
+            raw_img = obs.get("pixels", np.zeros((224, 224, 3), dtype=np.uint8))
             img_t = torch.tensor(raw_img, dtype=torch.float32).permute(2, 0, 1) / 255.0
-            img_t = torch.nn.functional.interpolate(
-                img_t.unsqueeze(0), size=(224, 224), mode="bilinear", align_corners=False
-            )                                       # (1, 3, 224, 224)
-            img_t = (img_t - 0.5) / 0.5
-            # V=2 双视角：agentview 复制作 wrist_image 占位
+            img_t = (img_t.unsqueeze(0) - 0.5) / 0.5              # (1, 3, 224, 224)
+            # V=2 双视角：单目复制作 wrist_image 占位
             img_2v = img_t.unsqueeze(1).expand(-1, 2, -1, -1, -1)  # (1,2,3,224,224)
 
             obs_dict = {
@@ -236,9 +232,9 @@ def _run_perturbed(
                 action = policy.select_action(obs_dict)
             action_np = action.cpu().numpy().ravel() if hasattr(action, "cpu") else np.array(action)
             action_np = action_np[:7]          # LIBERO 接受 7 维
-            obs, reward, done, info = env.step(action_np)
-            if done:
-                success = bool(info.get("success", reward > 0))
+            obs, reward, done, truncated, info = env.step(action_np)
+            if done or truncated:
+                success = bool(info.get("is_success", False))
                 break
 
         env.close()
