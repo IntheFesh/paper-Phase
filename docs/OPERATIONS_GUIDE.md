@@ -264,7 +264,45 @@ Reasons:
 4. **Oracle upper bound** — the gripper-flip oracle confirms that the concordance F1 gap
    to oracle is mostly explained by boundary ambiguity, not estimator noise.
 
-## 13 Document index
+## 13 Inference-side cliff detection (PACE v2 runtime path)
+
+The training-time cliff signals (`phase_centric/cliff_estimators.py`) live
+inside `PhaseQFlowPolicy.forward()` and feed the loss. At evaluation time
+the runtime-facing equivalents in
+`lerobot_policy_phaseqflow/inference/` decide *when to replan*:
+
+```python
+from lerobot_policy_phaseqflow.inference import (
+    compute_policy_variance,         # I^(2)
+    compute_velocity_curvature,      # I^(3)
+    ConcordanceDetector,             # rank fusion → C_t
+)
+
+det = ConcordanceDetector(window=16, threshold=0.35)
+det.reset()                          # call at start of each episode
+prev_c = None
+while not done:
+    action = policy.select_action(obs_dict)
+    i1 = float(getattr(policy, "_last_beta", 0.0))           # I^(1) cached by policy
+    i2 = compute_policy_variance(policy, obs_dict, n_samples=4)
+    i3, prev_c = compute_velocity_curvature(policy, obs_dict, prev_c)
+    if det.is_cliff(det.update(i1, i2, i3)):
+        # PCAR trigger: force replan on next step
+        ...
+```
+
+The policy's `_last_beta` and `flow_action_head._last_condition` are
+written automatically every `select_action()` call (see
+`modeling_phaseqflow.py:get_condition` and the PCAR/fallback branches of
+`select_action`). The detector itself is dependency-light (NumPy only) and
+covered by `tests/test_inference_concordance.py`.
+
+`scripts/eval/libero_perturbed.py` is the canonical example of the
+inference path; it gracefully falls back to no concordance when the
+package is missing (e.g. CPU-only smoke runs).
+
+## 14 Document index
 
 - Architecture and theory spec: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - Reproducibility statement: [`../REPRODUCIBILITY.md`](../REPRODUCIBILITY.md)
+- End-to-end GPU runbook: [`EXPERIMENT_RUNBOOK.md`](EXPERIMENT_RUNBOOK.md)
