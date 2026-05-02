@@ -277,6 +277,184 @@ def _save_figure(fig: Any, out_dir: Path, stem: str) -> None:
     fig.savefig(out_dir / f"{stem}.pdf", bbox_inches="tight")
 
 
+def _smooth_ema(ys: Sequence[float], alpha: float = 0.9) -> List[float]:
+    """Exponential moving average for noisy training curves (α closer to 1 = smoother)."""
+    out: List[float] = []
+    prev = float("nan")
+    for y in ys:
+        if math.isfinite(y):
+            prev = y if not math.isfinite(prev) else alpha * prev + (1 - alpha) * y
+        out.append(prev)
+    return out
+
+
+def _plot_training_dynamics(rows: Sequence[Dict[str, float]], out_dir: Path) -> Optional[str]:
+    """4-panel training dynamics figure for paper appendix.
+
+    Panels: (1) loss components  (2) gradient norm  (3) PACE-A β_t + boundary
+    density  (4) PCAR trigger rate + concordance C_t.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    steps = _column(rows, "step")
+    finite_steps = [s for s in steps if math.isfinite(s)]
+    if not finite_steps:
+        return None
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle("PACE v2 — Training dynamics", fontsize=13, y=1.01)
+
+    # -- Panel 1: loss components (smoothed) ----------------------------------
+    ax = axes[0, 0]
+    loss_keys = [
+        ("loss_total", "total", "#333333", 2.0),
+        ("loss_imitation", "imitation", "#1f77b4", 1.2),
+        ("loss_flow_policy", "flow", "#ff7f0e", 1.2),
+        ("loss_infonce_macro", "InfoNCE-macro", "#2ca02c", 1.0),
+        ("loss_infonce_micro", "InfoNCE-micro", "#d62728", 1.0),
+    ]
+    plotted_loss = False
+    for key, label, color, lw in loss_keys:
+        raw = _column(rows, key)
+        smoothed = _smooth_ema(raw, alpha=0.95)
+        pairs = [(s, y) for s, y in zip(steps, smoothed) if math.isfinite(s) and math.isfinite(y)]
+        if pairs:
+            sx, sy = zip(*pairs)
+            ax.plot(sx, sy, label=label, color=color, linewidth=lw)
+            plotted_loss = True
+    if plotted_loss:
+        ax.set_xlabel("step")
+        ax.set_ylabel("loss (EMA-smoothed)")
+        ax.set_title("Loss components")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3)
+    else:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+
+    # -- Panel 2: gradient norm (log scale) -----------------------------------
+    ax = axes[0, 1]
+    plotted_grad = False
+    for key in _GRAD_KEYS:
+        raw = _column(rows, key)
+        pairs = [(s, y) for s, y in zip(steps, raw) if math.isfinite(s) and math.isfinite(y) and y > 0]
+        if pairs:
+            sx, sy = zip(*pairs)
+            ax.plot(sx, sy, label=key.replace("grad_norm_", ""), linewidth=1.2)
+            plotted_grad = True
+    if plotted_grad:
+        ax.set_yscale("log")
+        ax.set_xlabel("step")
+        ax.set_ylabel("grad norm (log)")
+        ax.set_title("Per-module gradient norms")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3, which="both")
+    else:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+
+    # -- Panel 3: PACE-A β_t + boundary density (dual axis) ------------------
+    ax3 = axes[1, 0]
+    ax3r = ax3.twinx()
+    beta_pairs = [
+        (s, y) for s, y in zip(steps, _column(rows, "pace_a_mean_beta"))
+        if math.isfinite(s) and math.isfinite(y)
+    ]
+    density_pairs = [
+        (s, y) for s, y in zip(steps, _column(rows, "pace_a_boundary_density"))
+        if math.isfinite(s) and math.isfinite(y)
+    ]
+    if beta_pairs:
+        bsx, bsy = zip(*beta_pairs)
+        ax3.plot(bsx, _smooth_ema(list(bsy), 0.9), color="#1f77b4", linewidth=1.4,
+                 label=r"$\bar\beta_t$ (left)")
+        ax3.set_ylabel(r"mean $\beta_t$", color="#1f77b4")
+        ax3.tick_params(axis="y", labelcolor="#1f77b4")
+    if density_pairs:
+        dsx, dsy = zip(*density_pairs)
+        ax3r.plot(dsx, _smooth_ema(list(dsy), 0.9), color="#ff7f0e", linewidth=1.2,
+                  linestyle="--", label="density (right)")
+        ax3r.set_ylabel("boundary density", color="#ff7f0e")
+        ax3r.tick_params(axis="y", labelcolor="#ff7f0e")
+    ax3.set_xlabel("step")
+    ax3.set_title(r"PACE-A: $\beta_t$ & boundary density")
+    ax3.grid(alpha=0.3)
+    lines3 = ax3.get_lines() + ax3r.get_lines()
+    ax3.legend(lines3, [l.get_label() for l in lines3], fontsize=7, loc="upper right")
+
+    # -- Panel 4: PCAR trigger rate + concordance (dual axis) -----------------
+    ax4 = axes[1, 1]
+    ax4r = ax4.twinx()
+    trig_pairs = [
+        (s, y) for s, y in zip(steps, _column(rows, "pcar_trigger_rate"))
+        if math.isfinite(s) and math.isfinite(y)
+    ]
+    conc_pairs = [
+        (s, y) for s, y in zip(steps, _column(rows, "pcar_mean_concordance"))
+        if math.isfinite(s) and math.isfinite(y)
+    ]
+    if trig_pairs:
+        tsx, tsy = zip(*trig_pairs)
+        ax4.plot(tsx, _smooth_ema(list(tsy), 0.9), color="#2ca02c", linewidth=1.4,
+                 label="trigger rate (left)")
+        ax4.set_ylabel("PCAR trigger rate", color="#2ca02c")
+        ax4.tick_params(axis="y", labelcolor="#2ca02c")
+    if conc_pairs:
+        csx, csy = zip(*conc_pairs)
+        ax4r.plot(csx, _smooth_ema(list(csy), 0.9), color="#9467bd", linewidth=1.2,
+                  linestyle="--", label=r"$C_t$ (right)")
+        ax4r.set_ylabel(r"mean concordance $C_t$", color="#9467bd")
+        ax4r.tick_params(axis="y", labelcolor="#9467bd")
+    ax4.set_xlabel("step")
+    ax4.set_title(r"PCAR: trigger rate & concordance $C_t$")
+    ax4.grid(alpha=0.3)
+    lines4 = ax4.get_lines() + ax4r.get_lines()
+    ax4.legend(lines4, [l.get_label() for l in lines4], fontsize=7, loc="upper right")
+
+    fig.tight_layout()
+    _save_figure(fig, out_dir, "training_dynamics")
+    plt.close(fig)
+    return "training_dynamics"
+
+
+def _plot_phase_entropy(rows: Sequence[Dict[str, float]], out_dir: Path) -> Optional[str]:
+    """Phase posterior entropy (macro + micro) over training — shows phase learning progress."""
+    macro = _column(rows, "phase_posterior_entropy_macro")
+    micro = _column(rows, "phase_posterior_entropy_micro")
+    steps = _column(rows, "step")
+    if not _finite(macro) and not _finite(micro):
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for vals, label, color in [
+        (macro, "macro H(p_t)", "#1f77b4"),
+        (micro, "micro H(p_t)", "#ff7f0e"),
+    ]:
+        pairs = [(s, y) for s, y in zip(steps, vals) if math.isfinite(s) and math.isfinite(y)]
+        if pairs:
+            sx, sy = zip(*pairs)
+            ax.plot(sx, _smooth_ema(list(sy), 0.9), color=color, linewidth=1.5, label=label)
+            ax.plot(sx, sy, color=color, linewidth=0.4, alpha=0.3)
+    ax.set_xlabel("step")
+    ax.set_ylabel("posterior entropy H(p̂_t)")
+    ax.set_title("Phase posterior entropy during training")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    _save_figure(fig, out_dir, "phase_entropy")
+    plt.close(fig)
+    return "phase_entropy"
+
+
 def _plot_curves(rows: Sequence[Dict[str, float]], out_dir: Path) -> List[str]:
     """Plot loss + grad-norm curves and the β_t histogram. Returns names of
     figures actually written (so the report can link only to those)."""
@@ -426,6 +604,8 @@ def build_report(
 
     plotted = _plot_curves(rows, fig_dir)
     fsq_fig = _plot_fsq_usage(eval_results, fig_dir)
+    dynamics_fig = _plot_training_dynamics(rows, fig_dir)
+    entropy_fig = _plot_phase_entropy(rows, fig_dir)
 
     sections: List[str] = []
     sections.append(f"# Diagnostic report — `{input_dir.name}`\n")
@@ -474,7 +654,11 @@ def build_report(
             sections.append(f"- `figures/{name}.png` (PDF: `figures/{name}.pdf`)")
     if fsq_fig:
         sections.append(f"- `figures/{fsq_fig}.png` (PDF: `figures/{fsq_fig}.pdf`)")
-    if not plotted and not fsq_fig:
+    if dynamics_fig:
+        sections.append(f"- `figures/{dynamics_fig}.png` (PDF: `figures/{dynamics_fig}.pdf`)  ← 4-panel training overview")
+    if entropy_fig:
+        sections.append(f"- `figures/{entropy_fig}.png` (PDF: `figures/{entropy_fig}.pdf`)")
+    if not plotted and not fsq_fig and not dynamics_fig and not entropy_fig:
         sections.append("_No figures produced (matplotlib missing or no data)._")
     sections.append("")
 
